@@ -911,6 +911,15 @@ private fun SettingsSheet(ctl: UiController, onClose: () -> Unit) {
                 OutlinedButton(onClick = { ctl.testConnection() }) { Text("Test") }
             }
 
+            OutlinedTextField(
+                value = ctl.tavilyKey.value,
+                onValueChange = { ctl.saveTavilyKey(it) },
+                label = { Text("Tavily API key (free @ tavily.com) — web search") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
             Text("Model", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(

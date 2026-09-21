@@ -294,15 +294,13 @@ class LearnAnywhereAgent(
                 appendLine("attached documents for questions about their content.")
             }
             if (tools != null) {
-                appendLine("When the user asks you to find or fetch a paper or article, locate")
-                if (searchOn) {
-                    appendLine("it (searching if needed), check list_library for duplicates, then")
-                } else {
-                    appendLine("it from URLs you know reliably (for arXiv papers use")
-                    appendLine("https://arxiv.org/pdf/<id>), check list_library for duplicates, then")
-                }
-                appendLine("call download_document with the direct URL. Confirm out loud what")
-                appendLine("was added and whether it can be read aloud.")
+                appendLine("When the user asks you to find or fetch a paper: search_papers,")
+                appendLine("pick the best match (prefer one with pdf_url), check list_library")
+                appendLine("for duplicates, then download_document with that pdf_url. If")
+                appendLine("search_papers finds nothing, retry once with different terms")
+                appendLine("before giving up. For current events or general facts not in the")
+                appendLine("attached documents, use search_web if it is available. Confirm out")
+                appendLine("loud what was added and whether it can be read aloud.")
             }
         }
         systemExtra?.let { appendLine(); appendLine(it) }

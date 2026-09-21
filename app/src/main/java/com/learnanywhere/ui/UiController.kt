@@ -92,6 +92,7 @@ class UiController(
     private var resumeAfterAnswer = false
     private var wasPlaying = false
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
+    val tavilyKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_TAVILY_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
     // ---- voice input (on-device ASR; DESIGN.md §3.1) ----
@@ -515,6 +516,11 @@ class UiController(
     fun saveApiKey(k: String) {
         apiKey.value = k
         app.prefs.edit().putString(LearnAnywhereApp.KEY_GEMINI_API_KEY, k).apply()
+    }
+
+    fun saveTavilyKey(k: String) {
+        tavilyKey.value = k
+        app.prefs.edit().putString(LearnAnywhereApp.KEY_TAVILY_API_KEY, k).apply()
     }
 
     fun saveModel(m: String) {

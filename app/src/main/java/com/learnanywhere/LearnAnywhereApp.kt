@@ -63,7 +63,11 @@ class LearnAnywhereApp : Application() {
             docs = { store.docs },
             appCtx = this,
             webSearch = { prefs.getBoolean(KEY_WEB_SEARCH, true) },
-            tools = com.learnanywhere.agent.AgentTools(store)
+            tools = com.learnanywhere.agent.AgentTools(
+                store = store,
+                tavilyKey = { prefs.getString(KEY_TAVILY_API_KEY, "").orEmpty() },
+                webEnabled = { prefs.getBoolean(KEY_WEB_SEARCH, true) }
+            )
         )
         ui = com.learnanywhere.ui.UiController(this)
 
@@ -169,6 +173,7 @@ class LearnAnywhereApp : Application() {
 
     companion object {
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
+        const val KEY_TAVILY_API_KEY = "tavily_api_key"
         const val KEY_GEMINI_MODEL = "gemini_model"
         const val KEY_TTS_RATE = "tts_rate_f"
         const val KEY_GROUNDING = "use_grounding"

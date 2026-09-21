@@ -12,27 +12,48 @@ import com.learnanywhere.data.DocumentStore
  * Results and errors are returned to the MODEL as functionResponse JSON —
  * a failed download is information for the model to act on (retry another
  * URL, tell the user), never an exception up to the UI.
+ *
+ * Search tools exist because Gemini's google_search grounding has zero
+ * quota on the free tier (DESIGN §5): search_papers is keyless (arXiv +
+ * Semantic Scholar); search_web needs a Tavily key and is only DECLARED
+ * when one is configured and web search is enabled — the model never sees
+ * a tool that cannot succeed.
  */
-class AgentTools(private val store: DocumentStore) {
+class AgentTools(
+    private val store: DocumentStore,
+    private val tavilyKey: () -> String = { "" },
+    private val webEnabled: () -> Boolean = { true },
+) {
 
-    /** Emitted verbatim into tools[].functionDeclarations. */
-    val declarationsJson: String = """[
-      {"name":"download_document",
-       "description":"Download a document from a public URL and add it to the user's library so it can be discussed and read aloud. Use when the user asks to find, fetch, or add a paper or article, or confirms they want one that web search surfaced. Prefer direct PDF links (for arXiv use https://arxiv.org/pdf/<id>). Do not use for a page the user only wants summarized in passing — answer from search instead.",
-       "parameters":{"type":"object","properties":{
-         "url":{"type":"string","description":"Absolute https URL of the PDF or article to download"},
-         "title":{"type":"string","description":"Short human-readable title for the library entry"}},
-         "required":["url","title"]}},
-      {"name":"list_library",
-       "description":"List the documents currently in the user's library (title and kind). Use to check whether a document is already present before downloading it again.",
-       "parameters":{"type":"object","properties":{}}}
-    ]""".trimIndent()
+    private val papers = PaperSearchTool()
+    private val web = WebSearchTool(tavilyKey)
+
+    /** Emitted verbatim into tools[].functionDeclarations. Recomputed per
+     *  request: the Tavily key and web-search toggle can change at runtime. */
+    val declarationsJson: String
+        get() = buildString {
+            append("[\n")
+            append(SEARCH_PAPERS_DECL).append(",\n")
+            if (webEnabled() && tavilyKey().isNotBlank()) {
+                append(SEARCH_WEB_DECL).append(",\n")
+            }
+            append(DOWNLOAD_DOCUMENT_DECL).append(",\n")
+            append(LIST_LIBRARY_DECL).append("\n]")
+        }
 
     /** Execute one call; always returns a JSON object string for functionResponse. */
     suspend fun execute(name: String, argsJson: String): String {
         return try {
             when (name) {
                 "list_library" -> listLibrary()
+                "search_papers" -> {
+                    val args = org.json.JSONObject(argsJson)
+                    papers.search(args.getString("query"), args.optInt("max_results", 5))
+                }
+                "search_web" -> {
+                    val args = org.json.JSONObject(argsJson)
+                    web.search(args.getString("query"), args.optInt("max_results", 5))
+                }
                 "download_document" -> {
                     val args = org.json.JSONObject(argsJson)
                     downloadDocument(args.getString("url"), args.getString("title"))
@@ -87,5 +108,36 @@ class AgentTools(private val store: DocumentStore) {
                 .put("chars", text.length)
                 .toString()
         }
+    }
+
+    companion object {
+        private val SEARCH_PAPERS_DECL = """
+      {"name":"search_papers",
+       "description":"Search for academic papers by title, topic, or author (arXiv + Semantic Scholar, no key needed). Results include pdf_url when a free PDF exists — pass that to download_document to add the paper to the library. Use when the user wants to find, look up, or fetch a paper; do not use for general facts or news (use search_web) or for papers already in the library (check list_library).",
+       "parameters":{"type":"object","properties":{
+         "query":{"type":"string","description":"Title, topic, or author terms — a paper title works best verbatim"},
+         "max_results":{"type":"integer","description":"How many candidates to return, 1-10 (default 5)"}},
+         "required":["query"]}}""".trimIndent()
+
+        private val SEARCH_WEB_DECL = """
+      {"name":"search_web",
+       "description":"Search the web for current or general information (Tavily). Returns a short answer plus result snippets with URLs. Use for facts, news, or context not in the attached documents; do not use to find academic papers — search_papers is better for those.",
+       "parameters":{"type":"object","properties":{
+         "query":{"type":"string","description":"Plain search query"},
+         "max_results":{"type":"integer","description":"How many results, 1-10 (default 5)"}},
+         "required":["query"]}}""".trimIndent()
+
+        private val DOWNLOAD_DOCUMENT_DECL = """
+      {"name":"download_document",
+       "description":"Download a document from a public URL and add it to the user's library so it can be discussed and read aloud. Use when the user asks to find, fetch, or add a paper or article, or confirms they want one that search surfaced. Prefer direct PDF links (search_papers results carry pdf_url; for arXiv use https://arxiv.org/pdf/<id>). Do not use for a page the user only wants summarized in passing — answer from search instead.",
+       "parameters":{"type":"object","properties":{
+         "url":{"type":"string","description":"Absolute https URL of the PDF or article to download"},
+         "title":{"type":"string","description":"Short human-readable title for the library entry"}},
+         "required":["url","title"]}}""".trimIndent()
+
+        private val LIST_LIBRARY_DECL = """
+      {"name":"list_library",
+       "description":"List the documents currently in the user's library (title and kind). Use to check whether a document is already present before downloading it again.",
+       "parameters":{"type":"object","properties":{}}}""".trimIndent()
     }
 }
