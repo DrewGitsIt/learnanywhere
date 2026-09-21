@@ -294,9 +294,15 @@ Logic + App Check is the path if this ever ships).
    cap); HTML becomes a text doc. Combined with google_search via
    `includeServerSideToolInvocations`. ⚠️ Live-verification pending same
    as #5 (quota); the loop mechanics are unit-tested.
-7. **Voice loop v2**: streamed Gemini responses (SSE) → sentence-chunked
-   TTS, read-along highlight, barge-in. Consider migrating to the
-   Interactions API as part of this (§3.7).
+7. **Voice loop v2** — *v1 shipped 2026-09-21*: replies are spoken aloud
+   (Speak-replies setting, default on); opening the mic pauses TTS so the
+   recognizer doesn't hear our own output. The same day the UI was
+   reworked into a three-state single screen (entry / library / playback
+   with now-playing bar + read-along line; commit 120c730). Remaining
+   for v2: streamed Gemini responses (SSE) → sentence-chunked TTS so
+   speech starts before the model finishes, VAD-triggered barge-in, and
+   possibly the Interactions API migration (§3.7). Needs live-API
+   verification — blocked on quota at time of writing.
 8. **"Read with me" mode** interleaving section reading and discussion.
 9. **Neural TTS** (Piper via sherpa-onnx) as an optional voice.
 10. Later: Groq fallback provider, real figure extraction (vector-native),
