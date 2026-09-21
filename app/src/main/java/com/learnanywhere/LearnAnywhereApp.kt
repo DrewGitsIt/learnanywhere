@@ -173,6 +173,7 @@ class LearnAnywhereApp : Application() {
         const val KEY_TTS_RATE = "tts_rate_f"
         const val KEY_GROUNDING = "use_grounding"
         const val KEY_WEB_SEARCH = "web_search"
+        const val KEY_SPEAK_REPLIES = "speak_replies"
         const val DEFAULT_MODEL = com.learnanywhere.agent.Gemini.DEFAULT_MODEL
 
         @Volatile

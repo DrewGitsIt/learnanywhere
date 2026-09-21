@@ -45,6 +45,8 @@ class UiController(
     // ---- settings ----
     val useGrounding = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_GROUNDING, true))
     val webSearch = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_WEB_SEARCH, true))
+    /** Voice loop: speak agent replies aloud (default on — this is a voice app). */
+    val speakReplies = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_SPEAK_REPLIES, true))
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
@@ -79,6 +81,9 @@ class UiController(
      */
     fun toggleVoice() {
         if (voiceState.value == com.learnanywhere.speech.VoiceInput.State.IDLE) {
+            // Barge-in (v1): opening the mic silences any playing TTS so the
+            // recognizer doesn't transcribe our own voice output.
+            player.pause()
             voice.start { text -> ask(text) }
         } else {
             voice.stop()
@@ -147,12 +152,24 @@ class UiController(
                     app.agent.ask(q, systemExtra = "Ignore attached documents; answer from general knowledge and tag (general).")
                 }
                 this@UiController.reply.value = reply
+                // Voice loop: the answer is spoken (the whole point of the
+                // app). sayOnce QUEUE_FLUSHes, so a new reply interrupts a
+                // previous one.
+                if (speakReplies.value && reply.text.isNotBlank()) {
+                    player.sayOnce(reply.text)
+                }
             } catch (t: Throwable) {
                 error.value = t.message ?: t.toString()
             } finally {
                 busy.value = false
             }
         }
+    }
+
+    fun toggleSpeakReplies(v: Boolean) {
+        speakReplies.value = v
+        app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_SPEAK_REPLIES, v).apply()
+        if (!v) player.pause()
     }
 
     // ------------------------------------------------------------------
