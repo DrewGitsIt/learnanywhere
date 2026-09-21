@@ -1,5 +1,26 @@
 # LearnAnywhere — status
 
+## ⚠️ Pending: install 6264d70 on the phone
+The audit-hardening build (48/48 tests, byte-verified) is committed but the
+phone disconnected before `adb install`. When reconnected:
+`adb install -r app/build/outputs/apk/debug/app-debug.apk`, then one live
+tool-using ask (e.g. "Find the GPT-2 paper and add it to my library") to
+regression-check the per-round streaming reset and spoken tool cues.
+
+## Own search tools 2026-09-21 (replaces dead google_search grounding)
+- `search_papers` (arXiv + Semantic Scholar, keyless) — live-verified: "Find
+  the BERT paper" ran search_papers → list_library → download_document and
+  spoke the confirmation.
+- `search_web` (Tavily) — declared only when a key is set (Settings field;
+  free at tavily.com) AND web search is on. Built to the documented API; not
+  yet exercised live (no key).
+- Tool-loop audit (fresh-eyes Opus subagent) → 12 findings fixed in 6264d70:
+  per-round streaming reset, iteration-cap answer forcing, org.json-built
+  functionResponses, download URL/content hardening, honest error surfacing
+  (short spoken sentence + error line, never TTS-read HTTP dumps), streamed
+  rawParts coalescing, concurrent tool execution + "Searching…" cues, 180s
+  turn timeout + barge-in cancellation, history mutex, VALIDATED toolConfig.
+
 ## Live verification 2026-09-21 (device, real quota)
 - ✅ **Full agent flow verified end-to-end on the OnePlus 9**: text ask
   "Find the paper Attention Is All You Need and add it to my library" →

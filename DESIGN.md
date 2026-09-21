@@ -345,3 +345,17 @@ Logic + App Check is the path if this ever ships).
   parametric knowledge of canonical URLs (arxiv.org/pdf/<id>). Bare 429s are
   also no longer retried same-shape (only RetryInfo-bearing ones are).
   Usage/limits dashboard: https://ai.dev/rate-limit. (2026-09-21)
+- **Own search tools instead of Google grounding**: `search_papers` (arXiv
+  primary + Semantic Scholar best-effort, both keyless — S2's anonymous pool
+  429s routinely and that is treated as normal) and `search_web` (Tavily,
+  free tier ~1k req/month, key in Settings). Tools the current config cannot
+  serve are not declared to the model. Domain APIs beat general search for
+  the paper workflow: structured results with direct pdf_url feed straight
+  into download_document. (2026-09-21)
+- **Tool-loop hardening is contract-driven** (audit 2026-09-21, commit
+  6264d70): functionResponse parts built with a real JSON library, streamed
+  parts coalesced before the verbatim echo, per-round streaming reset,
+  iteration cap ends with a forced answer (never an empty reply), errors
+  reach the user as one short spoken sentence plus an error line — never as
+  fake model turns; model-supplied URLs are validated (https, public hosts,
+  text/pdf only) before fetching, including after redirects. (2026-09-21)
