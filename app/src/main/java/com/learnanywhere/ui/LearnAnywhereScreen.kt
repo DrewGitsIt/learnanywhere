@@ -11,7 +11,10 @@ import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,12 +23,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Headphones
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Mic
@@ -44,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -64,6 +70,7 @@ import com.learnanywhere.speech.VoiceInput
 fun LearnAnywhereScreen(ctl: UiController) {
     var dialog by remember { mutableStateOf(DialogType.None) }
     var showSettings by remember { mutableStateOf(false) }
+    var showSessions by remember { mutableStateOf(false) }
     var figuresDocId by remember { mutableStateOf<String?>(null) }
 
     // SAF: pick a PDF
@@ -95,7 +102,7 @@ fun LearnAnywhereScreen(ctl: UiController) {
                     }
                 },
                 actions = {
-                    if (ctl.reply.value != null) {
+                    if (ctl.thread.value.isNotEmpty()) {
                         IconButton(onClick = { ctl.newChat() }) {
                             Icon(Icons.Outlined.Refresh, contentDescription = "New chat")
                         }
@@ -106,7 +113,9 @@ fun LearnAnywhereScreen(ctl: UiController) {
                 }
             )
         },
-        bottomBar = { if (playbackVisible) NowPlayingBar(ctl) }
+        // Bottom chrome hosts the swipe-up sessions handle (entry #2) and,
+        // when audio is live, the now-playing bar above it.
+        bottomBar = { BottomChrome(ctl, playbackVisible) { showSessions = true } }
     ) { pad ->
         if (docs.isEmpty()) {
             EmptyState(
@@ -114,7 +123,8 @@ fun LearnAnywhereScreen(ctl: UiController) {
                 modifier = Modifier.padding(pad),
                 onAddPdf = { pickPdf.launch("application/pdf") },
                 onAddUrl = { dialog = DialogType.Url },
-                onAddText = { dialog = DialogType.Text })
+                onAddText = { dialog = DialogType.Text },
+                onOpenSessions = { showSessions = true })
         } else {
             LibraryState(
                 ctl,
@@ -122,7 +132,8 @@ fun LearnAnywhereScreen(ctl: UiController) {
                 onAddPdf = { pickPdf.launch("application/pdf") },
                 onAddUrl = { dialog = DialogType.Url },
                 onAddText = { dialog = DialogType.Text },
-                onShowFigures = { figuresDocId = it })
+                onShowFigures = { figuresDocId = it },
+                onOpenSessions = { showSessions = true })
         }
     }
 
@@ -132,6 +143,7 @@ fun LearnAnywhereScreen(ctl: UiController) {
         DialogType.None -> {}
     }
     if (showSettings) SettingsSheet(ctl) { showSettings = false }
+    if (showSessions) SessionsSheet(ctl) { showSessions = false }
     figuresDocId?.let { id -> FiguresDialog(ctl, id) { figuresDocId = null } }
 }
 
@@ -146,15 +158,20 @@ private fun EmptyState(
     modifier: Modifier,
     onAddPdf: () -> Unit,
     onAddUrl: () -> Unit,
-    onAddText: () -> Unit
+    onAddText: () -> Unit,
+    onOpenSessions: () -> Unit
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        // Sessions entry #1: top-left, below the header.
+        HistoryEntryButton(onOpenSessions,
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 2.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
         Spacer(Modifier.weight(0.7f))
         Icon(Icons.Outlined.Headphones, contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
@@ -197,7 +214,13 @@ private fun EmptyState(
                 textAlign = TextAlign.Center)
         }
 
-        ctl.reply.value?.let { Spacer(Modifier.height(20.dp)); ReplyCard(ctl) }
+        if (ctl.thread.value.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()) {
+                ctl.thread.value.forEach { turn -> TurnBubble(turn) }
+            }
+        }
         ctl.error.value?.let {
             Spacer(Modifier.height(12.dp))
             Text(it, color = MaterialTheme.colorScheme.error,
@@ -205,6 +228,14 @@ private fun EmptyState(
         }
         Spacer(Modifier.weight(1f))
         Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun HistoryEntryButton(onOpen: () -> Unit, modifier: Modifier = Modifier) {
+    FilledTonalIconButton(onClick = onOpen, modifier = modifier) {
+        Icon(Icons.Outlined.History, contentDescription = "Sessions")
     }
 }
 
@@ -242,7 +273,8 @@ private fun LibraryState(
     onAddPdf: () -> Unit,
     onAddUrl: () -> Unit,
     onAddText: () -> Unit,
-    onShowFigures: (String) -> Unit
+    onShowFigures: (String) -> Unit,
+    onOpenSessions: () -> Unit
 ) {
     val docs = ctl.docs.value
     val playingId = ctl.playback.value.queue.getOrNull(ctl.playback.value.cursor)
@@ -253,8 +285,12 @@ private fun LibraryState(
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Sessions entry #1: top-left, below the header.
+        item { HistoryEntryButton(onOpenSessions) }
         item { AskCard(ctl) }
-        ctl.reply.value?.let { item { ReplyCard(ctl) } }
+        if (ctl.thread.value.isNotEmpty()) {
+            items(ctl.thread.value) { turn -> TurnBubble(turn) }
+        }
         ctl.error.value?.let {
             item {
                 Text(it, color = MaterialTheme.colorScheme.error,
@@ -459,48 +495,54 @@ private fun AskCard(ctl: UiController) {
     }
 }
 
+/** One turn in the conversation thread: user right-aligned, model full-width. */
 @Composable
-private fun ReplyCard(ctl: UiController) {
-    val r = ctl.reply.value ?: return
-    val citedDoc = r.citedDocId?.let { id -> ctl.docs.value.firstOrNull { it.id == id } }
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer),
-        modifier = Modifier.fillMaxWidth()
+private fun TurnBubble(turn: UiController.ChatTurn) {
+    val isUser = turn.role == "user"
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(r.text.ifBlank { "(empty reply)" },
-                style = MaterialTheme.typography.bodyLarge)
-            if (citedDoc != null || r.citedFigure != null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    citedDoc?.let {
-                        AssistChip(onClick = {}, label = {
-                            Text(it.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }, leadingIcon = {
-                            Icon(Icons.Outlined.Description, null, modifier = Modifier.size(16.dp))
-                        })
-                    }
-                    r.citedFigure?.let {
-                        AssistChip(onClick = {}, label = { Text("Fig. $it") },
-                            leadingIcon = { Icon(Icons.Outlined.Image, null,
-                                modifier = Modifier.size(16.dp)) })
+        Card(
+            shape = RoundedCornerShape(
+                topStart = 18.dp, topEnd = 18.dp,
+                bottomStart = if (isUser) 18.dp else 6.dp,
+                bottomEnd = if (isUser) 6.dp else 18.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.secondaryContainer),
+            modifier = if (isUser) Modifier.widthIn(max = 300.dp) else Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(turn.text.ifBlank { "(empty reply)" },
+                    style = if (isUser) MaterialTheme.typography.bodyMedium
+                    else MaterialTheme.typography.bodyLarge)
+                if (turn.citedDocTitle != null || turn.citedFigure != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        turn.citedDocTitle?.let {
+                            AssistChip(onClick = {}, label = {
+                                Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }, leadingIcon = {
+                                Icon(Icons.Outlined.Description, null, modifier = Modifier.size(16.dp))
+                            })
+                        }
+                        turn.citedFigure?.let {
+                            AssistChip(onClick = {}, label = { Text("Fig. $it") },
+                                leadingIcon = { Icon(Icons.Outlined.Image, null,
+                                    modifier = Modifier.size(16.dp)) })
+                        }
                     }
                 }
-            }
-            if (r.sources.isNotEmpty()) {
-                Column {
-                    Text("Web sources", style = MaterialTheme.typography.labelMedium)
-                    r.sources.take(4).forEach { s ->
-                        Text("• $s", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (turn.sources.isNotEmpty()) {
+                    Column {
+                        Text("Web sources", style = MaterialTheme.typography.labelMedium)
+                        turn.sources.take(4).forEach { s ->
+                            Text("• $s", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
-            }
-            r.usage?.let {
-                Text("$it tokens", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -554,21 +596,58 @@ private fun MicButton(ctl: UiController, size: androidx.compose.ui.unit.Dp) {
 // =====================================================================
 // NOW PLAYING (playback state)
 
+/**
+ * Bottom chrome: the swipe-up sessions handle (entry #2 — swipe up from the
+ * bottom edge, or tap the pill) with the now-playing bar stacked above it
+ * whenever audio is live.
+ */
 @Composable
-private fun NowPlayingBar(ctl: UiController) {
+private fun BottomChrome(ctl: UiController, playbackVisible: Boolean, onOpenSessions: () -> Unit) {
+    Surface(
+        tonalElevation = if (playbackVisible) 6.dp else 2.dp,
+        shadowElevation = if (playbackVisible) 6.dp else 0.dp,
+        color = if (playbackVisible) MaterialTheme.colorScheme.surfaceContainerHigh
+        else MaterialTheme.colorScheme.surface
+    ) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+            if (playbackVisible) NowPlayingContent(ctl)
+            SessionsHandle(onOpenSessions)
+        }
+    }
+}
+
+@Composable
+private fun SessionsHandle(onOpen: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(22.dp)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures { _, dragAmount ->
+                    if (dragAmount < -6f) onOpen()   // upward swipe
+                }
+            }
+            .clickable(onClick = onOpen),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .size(width = 40.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.outlineVariant)
+        )
+    }
+}
+
+@Composable
+private fun NowPlayingContent(ctl: UiController) {
     val playback = ctl.playback.value
     val title = playback.queue.getOrNull(playback.cursor)?.let { id ->
         ctl.docs.value.firstOrNull { it.id == id }?.title
     } ?: "Speaking…"
-    Surface(
-        tonalElevation = 6.dp,
-        shadowElevation = 6.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
-    ) {
-        Column(Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 14.dp, vertical = 10.dp)) {
+    Column(Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 14.dp, vertical = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.GraphicEq, contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary)
@@ -614,8 +693,68 @@ private fun NowPlayingBar(ctl: UiController) {
                 }
             }
         }
+}
+
+// =====================================================================
+// SESSIONS SHEET (past conversations)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionsSheet(ctl: UiController, onClose: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onClose) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Sessions", style = MaterialTheme.typography.titleLarge)
+            val sessions = ctl.sessions.value
+            if (sessions.isEmpty()) {
+                Text("No saved conversations yet. Ask something — every conversation lands here.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 440.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    items(sessions, key = { it.id }) { s ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { ctl.resumeSession(s); onClose() }
+                                .padding(horizontal = 8.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(s.title, style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(relativeTime(s.updatedAt),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            IconButton(onClick = { ctl.deleteSession(s) }) {
+                                Icon(Icons.Outlined.Delete, contentDescription = "Delete session",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+
+private fun relativeTime(ts: Long): String =
+    android.text.format.DateUtils.getRelativeTimeSpanString(ts).toString()
 
 // =====================================================================
 // FIGURES DIALOG (per-document, opened from the context menu)

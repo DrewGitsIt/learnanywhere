@@ -43,6 +43,14 @@ class LearnAnywhereAgent(
 
     fun clearHistory() = history.clear()
 
+    /** Reload history from a persisted session (role "user"/"model" + text). */
+    fun restoreHistory(turns: List<Pair<String, String>>) {
+        history.clear()
+        turns.takeLast(MAX_HISTORY_TURNS * 2).forEach { (role, text) ->
+            history.addLast(Gemini.Message(role, listOf(Gemini.Part(text = text))))
+        }
+    }
+
     /** docId -> "uri|expiresAtMillis" for Files-API uploads (48 h server TTL). */
     private val filePrefs by lazy {
         appCtx.getSharedPreferences("learnanywhere_files", Context.MODE_PRIVATE)

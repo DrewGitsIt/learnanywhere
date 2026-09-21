@@ -33,6 +33,24 @@ class UiController(
     val question = mutableStateOf<String?>(null)
     val reply = mutableStateOf<com.learnanywhere.agent.LearnAnywhereAgent.AgentReply?>(null)
     val busy = mutableStateOf(false)
+
+    // ---- conversation sessions ----
+    data class ChatTurn(
+        val role: String,                 // "user" | "model"
+        val text: String,
+        val citedDocTitle: String? = null,
+        val citedFigure: String? = null,
+        val sources: List<String> = emptyList()
+    )
+
+    /** The running transcript of the current conversation (rendered as a thread). */
+    val thread = mutableStateOf<List<ChatTurn>>(emptyList())
+    /** All saved sessions, newest first (Room flow). */
+    val sessions = mutableStateOf<List<com.learnanywhere.app.db.ConversationRow>>(emptyList())
+
+    private var conversationId: String? = null
+    private var conversationTitle: String? = null
+    private var conversationCreatedAt: Long = 0L
     val error = mutableStateOf<String?>(null)
     /** Non-error status line (e.g. "Connected ✔") shown in Settings. */
     val info = mutableStateOf<String?>(null)
@@ -69,6 +87,7 @@ class UiController(
                 if (s.error != null) error.value = s.error
             }
         }
+        scope.launch { app.db.db.conversations().observe().collect { sessions.value = it } }
         scope.launch { voice.state.collect { voiceState.value = it } }
         scope.launch { voice.partial.collect { voicePartial.value = it } }
         scope.launch { voice.error.collect { if (it != null) error.value = it } }
@@ -148,6 +167,7 @@ class UiController(
             busy.value = true
             error.value = null
             question.value = q
+            thread.value = thread.value + ChatTurn("user", q)
             try {
                 val reply = if (useGrounding.value) {
                     app.agent.ask(q)
@@ -155,6 +175,12 @@ class UiController(
                     app.agent.ask(q, systemExtra = "Ignore attached documents; answer from general knowledge and tag (general).")
                 }
                 this@UiController.reply.value = reply
+                val citedTitle = reply.citedDocId?.let { id ->
+                    app.store.byId(id)?.title
+                }
+                thread.value = thread.value + ChatTurn(
+                    "model", reply.text, citedTitle, reply.citedFigure, reply.sources)
+                persistTurn(q, reply.text, citedTitle, reply.citedFigure, reply.sources)
                 // Voice loop: the answer is spoken (the whole point of the
                 // app). sayOnce QUEUE_FLUSHes, so a new reply interrupts a
                 // previous one.
@@ -166,6 +192,70 @@ class UiController(
             } finally {
                 busy.value = false
             }
+        }
+    }
+
+    /** Write one exchange to the current session (creating it on first ask). */
+    private fun persistTurn(
+        q: String, answer: String,
+        citedDocTitle: String?, citedFigure: String?, sources: List<String>
+    ) = scope.launch(Dispatchers.IO) {
+        try {
+            val dao = app.db.db.conversations()
+            val now = System.currentTimeMillis()
+            val cid = conversationId ?: java.util.UUID.randomUUID().toString().also {
+                conversationId = it
+                conversationTitle = q.take(60)
+                conversationCreatedAt = now
+            }
+            dao.upsert(com.learnanywhere.app.db.ConversationRow(
+                id = cid,
+                title = conversationTitle ?: q.take(60),
+                createdAt = conversationCreatedAt,
+                updatedAt = now))
+            dao.insert(com.learnanywhere.app.db.MessageRow(
+                id = java.util.UUID.randomUUID().toString(),
+                conversationId = cid, role = "user", text = q,
+                citedDocTitle = null, citedFigure = null, sources = null,
+                createdAt = now))
+            dao.insert(com.learnanywhere.app.db.MessageRow(
+                id = java.util.UUID.randomUUID().toString(),
+                conversationId = cid, role = "model", text = answer,
+                citedDocTitle = citedDocTitle, citedFigure = citedFigure,
+                sources = sources.joinToString("\n").ifBlank { null },
+                createdAt = now + 1))
+        } catch (t: Throwable) {
+            // Persistence must never break the ask flow.
+            android.util.Log.w("UiController", "persistTurn failed", t)
+        }
+    }
+
+    /** Reopen a saved session: transcript into the thread, turns into the agent. */
+    fun resumeSession(row: com.learnanywhere.app.db.ConversationRow) = scope.launch(Dispatchers.IO) {
+        try {
+            val msgs = app.db.db.conversations().messages(row.id)
+            conversationId = row.id
+            conversationTitle = row.title
+            conversationCreatedAt = row.createdAt
+            app.agent.restoreHistory(msgs.map { it.role to it.text })
+            thread.value = msgs.map { m ->
+                ChatTurn(m.role, m.text, m.citedDocTitle, m.citedFigure,
+                    m.sources?.split("\n")?.filter { it.isNotBlank() } ?: emptyList())
+            }
+            reply.value = null
+            error.value = null
+        } catch (t: Throwable) {
+            error.value = "Couldn't open session: ${t.message}"
+        }
+    }
+
+    fun deleteSession(row: com.learnanywhere.app.db.ConversationRow) = scope.launch(Dispatchers.IO) {
+        try {
+            app.db.db.conversations().deleteMessages(row.id)
+            app.db.db.conversations().deleteConversation(row.id)
+            if (row.id == conversationId) newChat()
+        } catch (t: Throwable) {
+            error.value = "Couldn't delete session: ${t.message}"
         }
     }
 
@@ -283,9 +373,16 @@ class UiController(
         app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_WEB_SEARCH, v).apply()
     }
 
-    /** Forget the multi-turn conversation and clear the reply card. */
+    /**
+     * Start a fresh conversation. The old one stays saved (sessions list);
+     * this only detaches from it.
+     */
     fun newChat() {
         app.agent.clearHistory()
+        conversationId = null
+        conversationTitle = null
+        conversationCreatedAt = 0L
+        thread.value = emptyList()
         reply.value = null
         question.value = null
         error.value = null
