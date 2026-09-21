@@ -364,4 +364,23 @@ class LearnAnywherePureTest {
         assertTrue(p.contains("ONE short, self-contained sentence"))
         assertTrue(p.contains("No page numbers"))
     }
+
+    /** Implicit-cache observability: cachedContentTokenCount surfaces. */
+    @Test
+    fun parseSurfacesCachedTokenCount() {
+        val g = com.learnanywhere.agent.Gemini({ "key" }, { "model" })
+        val body = """{
+          "candidates": [{"content": {"parts": [{"text": "Hi."}], "role": "model"},
+                          "finishReason": "STOP"}],
+          "usageMetadata": {"promptTokenCount": 5000, "candidatesTokenCount": 3,
+                            "cachedContentTokenCount": 4711}
+        }"""
+        val r = g.parse(body)
+        assertEquals(4711, r.cachedTokens)
+        assertEquals(5000, r.promptTokens)
+        // Absent field stays null, not zero.
+        val r2 = g.parse("""{"candidates":[{"content":{"parts":[{"text":"Hi."}]},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":5}}""")
+        assertEquals(null, r2.cachedTokens)
+    }
 }

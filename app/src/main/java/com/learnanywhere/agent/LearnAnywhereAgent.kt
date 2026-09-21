@@ -117,7 +117,16 @@ class LearnAnywhereAgent(
             }
 
             var searchNow = webSearch() && !searchQuotaTripped
-            var sys = systemPrompt(searchNow, systemExtra)
+            var sys = systemPrompt(searchNow)
+            // Prompt-cache alignment (DESIGN §5): the request prefix — system
+            // prompt, grounding docs, history — must stay byte-stable across
+            // turns for Gemini's implicit cache. Volatile per-turn context
+            // (reading cursor, grounding toggle) therefore rides LAST, as a
+            // user-role context message right before the question.
+            val extrasMsg = systemExtra?.let {
+                Gemini.Message("user", listOf(Gemini.Part(
+                    text = "[Session context — not the user speaking] $it")))
+            }
             val userMsg = Gemini.Message("user", listOf(Gemini.Part(text = question)))
 
             try {
@@ -165,13 +174,14 @@ class LearnAnywhereAgent(
                         if (e.code == 429 && searchNow) {
                             searchQuotaTripped = true
                             searchNow = false
-                            sys = systemPrompt(false, systemExtra)
+                            sys = systemPrompt(false)
                             call(contents)
                         } else throw e
                     }
 
                 val (grounding, usedFiles) = buildGrounding(inlineOnly = false)
-                var base = grounding + history.toList() + listOf(userMsg)
+                var base = grounding + history.toList() +
+                        listOfNotNull(extrasMsg) + listOf(userMsg)
                 var reply = try {
                     callDroppingSearchOn429(base)
                 } catch (e: GeminiError) {
@@ -181,7 +191,7 @@ class LearnAnywhereAgent(
                         usedFiles && e.code in 400..404 -> {
                             docsHere.forEach { filePrefs.edit().remove(it.id).apply() }
                             base = buildGrounding(inlineOnly = true).first +
-                                    history.toList() + listOf(userMsg)
+                                    history.toList() + listOfNotNull(extrasMsg) + listOf(userMsg)
                             try {
                                 callDroppingSearchOn429(base)
                             } catch (e2: GeminiError) {
@@ -249,7 +259,14 @@ class LearnAnywhereAgent(
                     // poisoned history on every later ask this session.
                     history.addLast(userMsg)
                     history.addLast(Gemini.Message("model", listOf(Gemini.Part(text = answer))))
-                    while (history.size > MAX_HISTORY_TURNS * 2) history.removeFirst()
+                    // Trim in BLOCKS of four turns: dropping one turn per ask
+                    // would shift the prompt prefix every turn and forfeit
+                    // all implicit-cache hits in long sessions.
+                    if (history.size > MAX_HISTORY_TURNS * 2) {
+                        repeat(HISTORY_TRIM_TURNS * 2) {
+                            if (history.isNotEmpty()) history.removeFirst()
+                        }
+                    }
                 }
 
                 val citedDoc = parsed?.citedDocument?.let { title ->
@@ -263,7 +280,8 @@ class LearnAnywhereAgent(
                     ?: Regex("Figure[\\s:-]*([A-Za-z0-9_\\-./]+)", RegexOption.IGNORE_CASE)
                         .find(answer)?.groupValues?.get(1)
                 val usage = if (reply.promptTokens != null || reply.completionTokens != null)
-                    "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" else null
+                    "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" +
+                            (reply.cachedTokens?.let { " cached=$it" } ?: "") else null
                 AgentReply(answer, citedDoc, fig, usage, reply.sources)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -321,7 +339,7 @@ class LearnAnywhereAgent(
 
     // ------------------------------------------------------------------
 
-    private fun systemPrompt(searchOn: Boolean, systemExtra: String?): String = buildString {
+    private fun systemPrompt(searchOn: Boolean): String = buildString {
         appendLine("# Role")
         appendLine("You are LearnAnywhere, a hands-free study companion. The user is often")
         appendLine("listening while driving or otherwise occupied, not reading a screen.")
@@ -359,7 +377,6 @@ class LearnAnywhereAgent(
                 appendLine("loud what was added and whether it can be read aloud.")
             }
         }
-        systemExtra?.let { appendLine(); appendLine(it) }
     }
 
     private fun mimeFor(d: Document) = when (d.source) {
@@ -382,6 +399,8 @@ class LearnAnywhereAgent(
     companion object {
         /** Kept small: doc grounding is re-sent every call, so context adds up fast. */
         private const val MAX_HISTORY_TURNS = 10
+        /** Turns dropped per trim — in a block, for prompt-prefix stability. */
+        private const val HISTORY_TRIM_TURNS = 4
 
         /** Hard cap on tool-loop rounds (best practice: 5–10 for a small agent). */
         private const val MAX_TOOL_ITERATIONS = 5

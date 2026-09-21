@@ -352,6 +352,17 @@ Logic + App Check is the path if this ever ships).
   serve are not declared to the model. Domain APIs beat general search for
   the paper workflow: structured results with direct pdf_url feed straight
   into download_document. (2026-09-21)
+- **Prompt-cache alignment is a layout rule, not an optimization pass.**
+  A study session is many turns over the same documents, so the request
+  prefix — system prompt, grounding parts, history — must stay byte-stable
+  turn over turn for Gemini's implicit cache (min ~4096 tokens; grounded
+  requests easily qualify). Concretely: per-turn context (read-with-me
+  cursor, grounding toggle) rides as a late user-role context message just
+  before the question, NEVER in the system instruction; tool declarations
+  are snapshotted per ask; history trims in blocks of 4 turns instead of 1
+  so the prefix survives between trims; tool-loop rounds extend the prior
+  request, which is itself cache-friendly. Verification: usage now shows
+  `cached=N` (usageMetadata.cachedContentTokenCount) per turn. (2026-09-21)
 - **Tool-loop hardening is contract-driven** (audit 2026-09-21, commit
   6264d70): functionResponse parts built with a real JSON library, streamed
   parts coalesced before the verbatim echo, per-round streaming reset,

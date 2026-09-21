@@ -78,7 +78,9 @@ class Gemini(
          * non-empty these MUST be echoed back as the model turn unaltered —
          * they carry thoughtSignature and functionCall.id.
          */
-        val rawParts: List<String> = emptyList()
+        val rawParts: List<String> = emptyList(),
+        /** Implicit-cache hit size (usageMetadata.cachedContentTokenCount). */
+        val cachedTokens: Int? = null
     )
 
     // ------------------------------------------------------------------
@@ -293,6 +295,7 @@ class Gemini(
             val sources = LinkedHashSet<String>()
             var promptTokens: Int? = null
             var completionTokens: Int? = null
+            var cachedTokens: Int? = null
             var finishReason: String? = null
             try {
                 resp.use { r ->
@@ -309,6 +312,7 @@ class Gemini(
                         sources.addAll(c.sources)
                         c.promptTokens?.let { promptTokens = it }
                         c.completionTokens?.let { completionTokens = it }
+                        c.cachedTokens?.let { cachedTokens = it }
                         c.finishReason?.let { finishReason = it }
                     }
                 }
@@ -324,7 +328,8 @@ class Gemini(
             // aggregate part shape so the tool loop's verbatim echo really
             // is verbatim (Gemini 3 contract).
             return Response(sb.toString(), promptTokens, completionTokens,
-                sources.toList(), fcalls, com.learnanywhere.core.ToolWire.coalesceTextParts(rawParts))
+                sources.toList(), fcalls,
+                com.learnanywhere.core.ToolWire.coalesceTextParts(rawParts), cachedTokens)
         }
     }
 
@@ -334,13 +339,14 @@ class Gemini(
         val text: String,
         val promptTokens: Int?,
         val completionTokens: Int?,
+        val cachedTokens: Int?,
         val sources: List<String>,
         val functionCalls: List<FunctionCall>,
         val rawParts: List<String>,
         val finishReason: String?
     ) {
         fun toResponse() = Response(text, promptTokens, completionTokens,
-            sources, functionCalls, rawParts)
+            sources, functionCalls, rawParts, cachedTokens)
     }
 
     private fun parseInternal(json: String, requireText: Boolean): Accum {
@@ -391,6 +397,7 @@ class Gemini(
             text,
             usage?.takeIf { it.has("promptTokenCount") }?.getInt("promptTokenCount"),
             usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount"),
+            usage?.takeIf { it.has("cachedContentTokenCount") }?.getInt("cachedContentTokenCount"),
             sources,
             fcalls,
             rawParts,
