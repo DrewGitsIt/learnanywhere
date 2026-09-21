@@ -294,17 +294,23 @@ Logic + App Check is the path if this ever ships).
    cap); HTML becomes a text doc. Combined with google_search via
    `includeServerSideToolInvocations`. ⚠️ Live-verification pending same
    as #5 (quota); the loop mechanics are unit-tested.
-7. **Voice loop v2** — *v1 shipped 2026-09-21*: replies are spoken aloud
-   (Speak-replies setting, default on); opening the mic pauses TTS so the
-   recognizer doesn't hear our own output. The same day the UI was
-   reworked into a three-state single screen (entry / library / playback
-   with now-playing bar + read-along line; commit 120c730). Remaining
-   for v2: streamed Gemini responses (SSE) → sentence-chunked TTS so
-   speech starts before the model finishes, VAD-triggered barge-in, and
-   possibly the Interactions API migration (§3.7). Needs live-API
-   verification — blocked on quota at time of writing.
-8. **"Read with me" mode** interleaving section reading and discussion.
-9. **Neural TTS** (Piper via sherpa-onnx) as an optional voice.
+7. ~~Voice loop v2~~ — **shipped 2026-09-21** (commit 5467d49): SSE
+   streaming (`generateTextStreamed`) → StreamingAnswerExtractor (answer
+   field out of structured JSON as it streams) → SentenceChunker →
+   `enqueueSay` progressive TTS; Silero-VAD barge-in
+   (`BargeInGuard`, VOICE_COMMUNICATION + AEC, "Voice interrupt"
+   setting). **Barge-in device-verified with live room audio** (it
+   interrupted Piper playback on real speech and auto-asked). SSE wire
+   format still needs one live call (quota). Interactions API migration
+   deliberately deferred.
+8. ~~"Read with me" mode~~ — **shipped 2026-09-21** (commit 3e31fcf):
+   per-document guided reading (pure `Sections` splitter), auto-advance,
+   speak-to-interrupt with local intents ("continue", "next section",
+   "stop reading"), questions carry the reading cursor as context and
+   reading resumes after the answer. Not yet exercised on device.
+9. ~~Neural TTS~~ — **shipped 2026-09-21** (commit 72a72e1): Piper
+   en_US-amy-medium via sherpa-onnx OfflineTts, default voice, automatic
+   session-fallback to system TTS on failure; device-verified speaking.
 10. Later: Groq fallback provider, real figure extraction (vector-native),
     richer AA surface, Koog if the agent outgrows hand-rolled.
 
