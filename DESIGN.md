@@ -155,6 +155,94 @@ mic (16 kHz, foreground service)
 5. PDF text-layer extraction quality (pdfbox-android) on real papers —
    determines how good "read the paper aloud" can be without cloud help.
 
+### 3.7 Agent architecture review (researched 2026-09-21)
+
+Drew's observation: this is a small **research agent** with free Gemini as
+the reasoning model — so audit it against agent-design practice. Findings
+(all verified against ai.google.dev unless noted):
+
+**Framework: hand-rolled is correct at this scale.** Native Android apps in
+2026 either hand-roll against REST or use Google's Gen AI Kotlin SDK
+(`com.google.genai:google-genai-kotlin:1.0.0` — would replace our JSON
+boilerplate, but our pure body-builder is unit-tested and free-tier-tuned,
+so raw OkHttp stays). langchain4j isn't Android-targeted; LangGraph is
+Python/JS-only. **JetBrains Koog 1.0** (Kotlin Multiplatform incl. Android,
+Gemini support, agent loop + history compression + persistence) is the one
+credible framework — the graduation path if the loop outgrows ~3 tools, not
+a starting point.
+
+**API surface — the headline**: Google shipped the **Interactions API**
+(GA ~June 2026; `POST /v1beta/interactions`), now the *default* surface;
+`generateContent` is labeled "legacy" but fully supported. It holds
+conversation state server-side (`previous_interaction_id`) — which would
+eliminate our per-turn history + document re-send and automate the
+thought-signature bookkeeping. Free tier: available, but stored
+interactions expire after **1 day** (paid: up to 55 days). *Decision:
+stay on generateContent for now; migrate when we build the voice loop
+(new models/tools launch on Interactions first), and keep client-side
+history as the always-works fallback for the 1-day expiry.*
+
+**Custom tools (for the fetch-document increment)**: Gemini 3 lifts the old
+restriction — `google_search` + `functionDeclarations` combine in ONE
+request: `toolConfig.includeServerSideToolInvocations: true`, mode
+`VALIDATED` (AUTO unsupported in combo), and we MUST round-trip every
+part's `thoughtSignature` and each `functionCall.id` or the API errors.
+The built-in `url_context` tool may cover "read this URL" without a
+custom tool. Loop rules (non-negotiable): hard iteration cap (5–10);
+execute ALL parallel functionCalls and return all functionResponses in
+one message; tool failures go back to the model as
+`functionResponse{error: …}`, never thrown to the user. Tool schemas:
+few tools, verb_noun names, descriptions that say when NOT to use them,
+enums for closed sets, compact paginated results.
+
+**Context & caching**: implicit caching is automatic and free (min 4,096
+tokens on 3.x Flash; stable prefix first — our docs-first ordering is
+already cache-aligned). Explicit `cachedContents` is paid-only. The real
+fix for re-sending PDF bytes every turn is the **Files API** (free, 48 h
+retention, 50 MB/1,000 pages): upload once, reference by
+`file_data.file_uri` as the first part each turn. Library economy: as the
+library grows, let the model *pull* docs via `search_library`/
+`list_library` tools instead of us pushing everything; SQLite FTS5 if
+keyword retrieval is ever needed; vector RAG is overkill at ≤ dozens of
+docs. History: sliding window is fine for voice sessions; strip old
+tool-call payloads, keep final texts.
+
+**Generation config corrections (both classes of bug already bit us)**:
+- Thinking: on 3.x use `thinkingConfig.thinkingLevel` (`thinkingBudget`
+  is 2.5-era; sending both errors). 3.7/3.8-flash: low/medium/high, no
+  full off; 3.6-flash has `minimal`. Thinking tokens count against
+  `maxOutputTokens` (our empty-reply bug) → set thinkingLevel low, keep
+  maxOutputTokens generous, constrain length via prompt.
+- **Temperature: leave at the default 1.0 on Gemini 3** — official docs
+  warn lower values cause looping/degradation. We currently send 0.4 →
+  change in the hardening pass.
+
+**System prompt**: restructure with delimited sections (Role / Context /
+Tools / Output rules / Guardrails); grounding rules belong in
+systemInstruction; 1–2 few-shot exchanges beat rules for format; and the
+highest-leverage line for this app: voice output rules ("responses are
+spoken by TTS: conversational prose, no markdown, no bullet lists, no
+URLs read aloud, 2–4 sentences unless asked").
+
+**Robustness**: 429 bodies carry `google.rpc.RetryInfo.retryDelay` in
+`error.details` — exponential backoff with jitter, honor retryDelay,
+and do NOT retry daily-quota (RPD) exhaustion; surface "quota resets
+midnight PT" instead. `streamGenerateContent?alt=sse` works on the free
+tier and is the right transport for the voice loop (Live API exists but
+free quotas are tight, and we keep ASR/TTS local anyway). Structured
+output (`responseSchema`) is free-tier and, on Gemini 3, combinable with
+tools — the right replacement for our regex citation extraction.
+
+**Testing (proportionate)**: fake-model unit tests for the tool loop
+(iteration cap, parallel calls, error feedback); a hand-run golden set of
+10–20 prompts asserting tool-call *behavior*; full request/response
+transcript logging in debug builds (the future eval corpus). No eval
+frameworks, no LLM-as-judge.
+
+**Security**: the API key is user-entered and stored on-device — fine for
+a personal app. Never distribute an APK with a baked-in key (Firebase AI
+Logic + App Check is the path if this ever ships).
+
 ## 4. Roadmap (proposed order)
 
 1. **Fix the live Gemini 4xx** (error text now readable) and verify the fixes
@@ -182,17 +270,28 @@ mic (16 kHz, foreground service)
    whisper tiny/base — the right size-class comparator), whisper
    base/small.en, **Parakeet-TDT 0.6B** (best open accuracy but ~600 MB
    int8 and batch-only in sherpa-onnx — a "docked flagship" option, not
-   a everyday default).
+   an everyday default).
 4. ~~Conversation history + search grounding~~ — **done 2026-09-21**:
    multi-turn history (last 10 turns, "New chat" resets), google_search
    tool on by default (Settings toggle), grounding citations rendered as
    "Web sources" under the reply.
-5. **Voice loop v2**: streamed Gemini responses → sentence-chunked TTS,
-   read-along highlight, barge-in.
-6. **"Read with me" mode** interleaving section reading and discussion.
-7. **Neural TTS** (Piper via sherpa-onnx) as an optional voice.
-8. Later: Files API for >20 MB PDFs, Groq fallback provider, real figure
-   extraction (vector-native), richer AA surface.
+5. **Agent hardening pass** (from §3.7): temperature → default 1.0,
+   `thinkingLevel: low`, RetryInfo-aware 429 backoff, Files API grounding
+   (upload once / `file_uri` per turn, cache-aligned prefix), restructured
+   voice-aware system prompt, structured-output citations, debug
+   transcript logging.
+6. **Fetch-document tool**: function calling combined with google_search
+   (Gemini 3 combo per §3.7 — includeServerSideToolInvocations +
+   thoughtSignature/id round-tripping), `download_document(url)` lands the
+   file in the library via the existing add path. Closes the "remote
+   documents I know exist" workflow.
+7. **Voice loop v2**: streamed Gemini responses (SSE) → sentence-chunked
+   TTS, read-along highlight, barge-in. Consider migrating to the
+   Interactions API as part of this (§3.7).
+8. **"Read with me" mode** interleaving section reading and discussion.
+9. **Neural TTS** (Piper via sherpa-onnx) as an optional voice.
+10. Later: Groq fallback provider, real figure extraction (vector-native),
+    richer AA surface, Koog if the agent outgrows hand-rolled.
 
 ## 5. Decisions log
 
@@ -205,3 +304,13 @@ mic (16 kHz, foreground service)
   API free tiers only. (2026-09-20)
 - **sherpa-onnx as the single on-device speech dependency** (VAD + ASR + later
   TTS) rather than separate whisper.cpp/Vosk/Piper integrations. (2026-09-20)
+- **Hand-rolled agent loop, raw REST** — no LangChain-class deps in the APK;
+  Koog is the graduation path, Google's Kotlin Gen AI SDK the boilerplate
+  option. (2026-09-21)
+- **Stay on generateContent for now; migrate to the Interactions API with the
+  voice-loop increment** — server-side state is the right fit, but free-tier
+  chains expire after 1 day, so client-side history remains the fallback.
+  (2026-09-21)
+- **Gemini 3 config**: temperature at default 1.0 (docs warn lower degrades),
+  thinkingLevel low, generous maxOutputTokens with length constrained via
+  prompt. (2026-09-21)
