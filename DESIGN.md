@@ -275,11 +275,17 @@ Logic + App Check is the path if this ever ships).
    multi-turn history (last 10 turns, "New chat" resets), google_search
    tool on by default (Settings toggle), grounding citations rendered as
    "Web sources" under the reply.
-5. **Agent hardening pass** (from §3.7): temperature → default 1.0,
-   `thinkingLevel: low`, RetryInfo-aware 429 backoff, Files API grounding
-   (upload once / `file_uri` per turn, cache-aligned prefix), restructured
-   voice-aware system prompt, structured-output citations, debug
-   transcript logging.
+5. ~~Agent hardening pass~~ — **done 2026-09-21** (from §3.7): temperature
+   → default 1.0, `thinkingLevel: low`, RetryInfo-aware 429 backoff with
+   daily-quota detection, Files API grounding (upload once / `file_uri`
+   per turn, prefs-cached 47 h, inline fallback + 4xx invalidation),
+   sectioned voice-aware system prompt, structured-output citations
+   (JSON schema, plain-text 400 fallback), fixed Part-union violation
+   (text and inlineData were sent in ONE part), debug transcript JSONL
+   under filesDir/transcripts/. ⚠️ Live verification of the
+   schema+search combo pending — we exhausted the free quota testing on
+   2026-09-21; first real ask next session confirms it (fallbacks in
+   place either way).
 6. **Fetch-document tool**: function calling combined with google_search
    (Gemini 3 combo per §3.7 — includeServerSideToolInvocations +
    thoughtSignature/id round-tripping), `download_document(url)` lands the

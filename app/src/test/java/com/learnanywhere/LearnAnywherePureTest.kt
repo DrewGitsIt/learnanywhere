@@ -59,6 +59,57 @@ class LearnAnywherePureTest {
         assertEquals(with.count { it == '{' }, with.count { it == '}' }, "unbalanced braces")
     }
 
+    /** Hardening pass (DESIGN §3.7): thinkingConfig, responseSchema, fileData parts. */
+    @Test
+    fun geminiBodyEmitsThinkingSchemaAndFileData() {
+        val body = GeminiBodyBuilder.generateContent(
+            contents = listOf(GeminiBodyBuilder.Message("user", listOf(
+                GeminiBodyBuilder.Part(text = "grounding"),
+                GeminiBodyBuilder.Part(mime = "application/pdf",
+                    fileUri = "https://generativelanguage.googleapis.com/v1beta/files/abc")
+            ))),
+            systemInstruction = null,
+            temperature = 1.0f, topP = 0.95f, maxOutputTokens = 4096,
+            thinkingLevel = "low",
+            responseSchemaJson = """{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"""
+        )
+        assertTrue(body.contains("\"thinkingConfig\":{\"thinkingLevel\":\"low\"}"), "thinkingConfig missing")
+        assertTrue(body.contains("\"responseMimeType\":\"application/json\""), "responseMimeType missing")
+        assertTrue(body.contains("\"responseSchema\":{\"type\":\"object\""), "responseSchema missing")
+        assertTrue(body.contains("\"fileData\":{\"mimeType\":\"application/pdf\",\"fileUri\":"), "fileData missing")
+        assertFalse(body.contains("inlineData"), "fileUri part must not emit inlineData")
+        assertEquals(body.count { it == '{' }, body.count { it == '}' }, "unbalanced braces")
+    }
+
+    /** Structured replies parse into fields; non-JSON falls back to null. */
+    @Test
+    fun replyJsonParsesStructuredAnswer() {
+        val p = com.learnanywhere.agent.ReplyJson.parse(
+            """{"answer": "The encoder has six layers.", "cited_document": "Attention Is All You Need", "cited_figure": "Figure 1"}""")
+        assertEquals("The encoder has six layers.", p?.answer)
+        assertEquals("Attention Is All You Need", p?.citedDocument)
+        assertEquals("Figure 1", p?.citedFigure)
+
+        val minimal = com.learnanywhere.agent.ReplyJson.parse("""{"answer":"Hi."}""")
+        assertEquals("Hi.", minimal?.answer)
+        assertEquals(null, minimal?.citedDocument)
+
+        assertEquals(null, com.learnanywhere.agent.ReplyJson.parse("plain prose, not JSON"))
+    }
+
+    /** 429 handling: RetryInfo delay parsing and daily-quota detection. */
+    @Test
+    fun retryInfoParsing() {
+        val body = """{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[
+            {"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"22s"}]}}"""
+        assertEquals(22000L, com.learnanywhere.agent.retryDelayMs(body))
+        assertEquals(null, com.learnanywhere.agent.retryDelayMs("{}"))
+        assertTrue(com.learnanywhere.agent.isDailyQuota(
+            """{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}"""))
+        assertFalse(com.learnanywhere.agent.isDailyQuota(
+            """{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}"""))
+    }
+
     /** Escape() must emit spec-compliant JSON string literals. */
     @Test
     fun escapeProducesValidJsonStringContent() {

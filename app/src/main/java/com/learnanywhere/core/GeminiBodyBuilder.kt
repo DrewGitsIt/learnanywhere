@@ -13,7 +13,8 @@ object GeminiBodyBuilder {
     data class Part(
         val text: String? = null,
         val mime: String? = null,
-        val dataB64: String? = null
+        val dataB64: String? = null,
+        val fileUri: String? = null
     )
 
     data class Message(val role: String, val parts: List<Part> = listOf())
@@ -28,7 +29,9 @@ object GeminiBodyBuilder {
         temperature: Float,
         topP: Float,
         maxOutputTokens: Int,
-        enableGoogleSearch: Boolean = false
+        enableGoogleSearch: Boolean = false,
+        thinkingLevel: String? = null,
+        responseSchemaJson: String? = null
     ): String {
         val sb = StringBuilder().append("{")
         sb.append("\"contents\":[")
@@ -48,7 +51,17 @@ object GeminiBodyBuilder {
         }
         sb.append(",\"generationConfig\":{\"temperature\":")
             .append(temperature).append(",\"topP\":").append(topP)
-            .append(",\"maxOutputTokens\":").append(maxOutputTokens).append("}")
+            .append(",\"maxOutputTokens\":").append(maxOutputTokens)
+        if (thinkingLevel != null) {
+            // Gemini 3: thinkingLevel (NOT thinkingBudget — sending both errors).
+            sb.append(",\"thinkingConfig\":{\"thinkingLevel\":\"")
+                .append(thinkingLevel).append("\"}")
+        }
+        if (responseSchemaJson != null) {
+            sb.append(",\"responseMimeType\":\"application/json\",\"responseSchema\":")
+                .append(responseSchemaJson)
+        }
+        sb.append("}")
         if (enableGoogleSearch) {
             // Google Search grounding — free tier includes it (DESIGN.md §3.4).
             sb.append(",\"tools\":[{\"google_search\":{}}]")
@@ -58,9 +71,12 @@ object GeminiBodyBuilder {
     }
 
     private fun Part.toJson(): String = buildString {
+        // Part is a union type: exactly one of text / inlineData / fileData.
         val parts = ArrayList<String>()
         text?.let { parts.add("\"text\":\"${escape(it)}\"") }
-        if (mime != null && dataB64 != null) {
+        if (mime != null && fileUri != null) {
+            parts.add("\"fileData\":{\"mimeType\":\"$mime\",\"fileUri\":\"${escape(fileUri)}\"}")
+        } else if (mime != null && dataB64 != null) {
             parts.add("\"inlineData\":{\"mimeType\":\"$mime\",\"data\":\"$dataB64\"}")
         }
         append("{").append(parts.joinToString(",")).append("}")

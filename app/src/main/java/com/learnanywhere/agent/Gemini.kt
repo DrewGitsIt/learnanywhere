@@ -4,24 +4,24 @@ import com.learnanywhere.core.GeminiBodyBuilder
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.Response
 import java.util.Base64
 
 /**
- * Thin, minimal client for the Gemini REST `:generateContent` endpoint.
+ * Thin, minimal client for the Gemini REST `:generateContent` endpoint plus
+ * the Files API (upload once / reference by URI for 48 h).
  *
  * The request *body* is built by the pure [GeminiBodyBuilder] (unit-tested in
  * `LearnAnywherePureTest`) so the exact shape we send is the exact shape we assert on.
- * This class only handles the OkHttp plumbing.
+ * This class only handles the OkHttp plumbing, retries, and response parsing.
  *
- * Why raw OkHttp instead of the official `google-genai` Java SDK?
- *  - The SDK's Android artifact is heavier than we want and its free-tier
- *    handling is opinionated; a 90-line client makes the whole AI surface
- *    of this app one file.
- *  - Free-tier PDF upload is a plain `inline_data` part — no Files API, no
- *    auth dance. (The Files API *is* available on the free tier, but is for
- *    >20 MB; our inline path is simpler and the PDFs we care about — papers,
- *    articles — are well under the 50 MB / 1000-page inline cap.)
+ * Free-tier hardening (DESIGN.md §3.7):
+ *  - 429/503 are retried with exponential backoff + jitter, honoring the
+ *    server's RetryInfo.retryDelay; daily-quota (RPD) exhaustion is NOT
+ *    retried — it surfaces as an error naming the reset time.
+ *  - `thinkingLevel: low` bounds Gemini 3 thinking spend (it can't be fully
+ *    disabled on 3.7+); thinking tokens count against maxOutputTokens.
+ *  - Temperature stays at the model default 1.0 — Gemini 3 docs warn that
+ *    lowering it causes looping/degradation.
  */
 class Gemini(
     private val apiKey: () -> String,
@@ -30,21 +30,33 @@ class Gemini(
 ) {
     data class Part(val text: String? = null,
                     val mime: String? = null,
-                    val dataB64: String? = null)
+                    val dataB64: String? = null,
+                    val fileUri: String? = null)
 
     data class Message(val role: String, val parts: List<Part>)
 
-    /** Grounding part for a PDF (Gemini reads the file directly, including figures). */
+    /**
+     * Grounding message for a PDF already uploaded to the Files API.
+     * Preferred over [pdfPart]: no re-upload per turn, cache-friendly.
+     */
+    fun filePart(title: String, fileUri: String, mime: String = "application/pdf"): Message =
+        Message("user", listOf(
+            Part(text = "You are grounded in the attached document: \"$title\". Use it to answer."),
+            Part(mime = mime, fileUri = fileUri)
+        ))
+
+    /** Inline-bytes grounding for a PDF (fallback when the Files API fails). */
     fun pdfPart(title: String, pdfBytes: ByteArray): Message = Message("user", listOf(
-        Part(text = "You are grounded in the attached document: \"$title\". Use it to answer.",
-             mime = "application/pdf",
+        // A Part is a union type: text and inlineData must be SEPARATE parts.
+        Part(text = "You are grounded in the attached document: \"$title\". Use it to answer."),
+        Part(mime = "application/pdf",
              dataB64 = Base64.getEncoder().encodeToString(pdfBytes))
     ))
 
-    /** Grounding part for arbitrary text (article body, pasted notes, etc.). */
+    /** Grounding message for arbitrary text (article body, pasted notes, etc.). */
     fun textPart(title: String, content: String, mime: String = "text/plain"): Message = Message("user", listOf(
-        Part(text = "Attached reference material from: \"$title\" (mime: $mime)",
-             mime = mime,
+        Part(text = "Attached reference material from: \"$title\" (mime: $mime)"),
+        Part(mime = mime,
              dataB64 = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8)))
     ))
 
@@ -61,10 +73,12 @@ class Gemini(
     fun generateText(
         contents: List<Message>,
         systemInstruction: String? = null,
-        temperature: Float = 0.4f,
+        temperature: Float = 1.0f,
         topP: Float = 0.95f,
-        maxTokens: Int = 2048,
-        enableSearch: Boolean = false
+        maxTokens: Int = 4096,
+        enableSearch: Boolean = false,
+        thinkingLevel: String? = "low",
+        responseSchemaJson: String? = null
     ): Response {
         val body = GeminiBodyBuilder.generateContent(
             contents = contents.map { m -> m.toBody() },
@@ -72,7 +86,9 @@ class Gemini(
             temperature = temperature,
             topP = topP,
             maxOutputTokens = maxTokens,
-            enableGoogleSearch = enableSearch
+            enableGoogleSearch = enableSearch,
+            thinkingLevel = thinkingLevel,
+            responseSchemaJson = responseSchemaJson
         )
         val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
                 (model().ifBlank { DEFAULT_MODEL }) + ":generateContent"
@@ -81,27 +97,105 @@ class Gemini(
             .header("x-goog-api-key", apiKey().ifBlank { throw IllegalStateException("No API key") })
             .post(RequestBody.create("application/json".toMediaType(), body.toByteArray(java.nio.charset.StandardCharsets.UTF_8)))
             .build()
+        TranscriptLog.log("request", body)
 
-        client.newCall(req).execute().use { resp ->
-            val body = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) throw GeminiError(resp.code, summarizeError(body, "HTTP ${resp.code}"))
-            return parse(body)
+        var attempt = 0
+        while (true) {
+            attempt++
+            client.newCall(req).execute().use { resp ->
+                val respBody = resp.body?.string() ?: ""
+                if (resp.isSuccessful) {
+                    TranscriptLog.log("response", respBody)
+                    return parse(respBody)
+                }
+                TranscriptLog.log("error(${resp.code})", respBody)
+                val retriable = (resp.code == 429 || resp.code == 503) &&
+                        attempt < MAX_ATTEMPTS && !isDailyQuota(respBody)
+                if (!retriable) {
+                    val msg = if (resp.code == 429 && isDailyQuota(respBody))
+                        "daily free-tier quota exhausted (resets midnight Pacific)"
+                    else summarizeError(respBody, "HTTP ${resp.code}")
+                    throw GeminiError(resp.code, msg)
+                }
+                val backoff = 1000L shl (attempt - 1)   // 1s, 2s, 4s…
+                val delay = maxOf(retryDelayMs(respBody) ?: 0L, backoff)
+                    .coerceAtMost(30_000L) + (0..250).random()
+                Thread.sleep(delay)
+            }
         }
     }
 
-    // Gemini 3.x are thinking models: thought tokens count against
-    // maxOutputTokens, so tiny budgets return empty text with
-    // finishReason=MAX_TOKENS. Keep every budget comfortably above the
-    // thinking overhead.
     fun ping(): Response =
         generateText(listOf(Message("user", Part(text = "Reply with the single word OK.").let { listOf(it) })),
             maxTokens = 256)
 
     // ------------------------------------------------------------------
+    // Files API (free tier; 48 h retention; 50 MB / 1,000 pages per PDF)
+
+    data class UploadedFile(val name: String, val uri: String, val state: String)
+
+    /**
+     * Upload bytes via the resumable protocol (start → upload+finalize),
+     * then wait for the file to become ACTIVE. Blocking; call on IO.
+     */
+    fun uploadFile(bytes: ByteArray, mime: String, displayName: String): UploadedFile {
+        val key = apiKey().ifBlank { throw IllegalStateException("No API key") }
+        val meta = "{\"file\":{\"display_name\":\"" +
+                GeminiBodyBuilder.escape(displayName) + "\"}}"
+        val start = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/upload/v1beta/files")
+            .header("x-goog-api-key", key)
+            .header("X-Goog-Upload-Protocol", "resumable")
+            .header("X-Goog-Upload-Command", "start")
+            .header("X-Goog-Upload-Header-Content-Length", bytes.size.toString())
+            .header("X-Goog-Upload-Header-Content-Type", mime)
+            .post(RequestBody.create("application/json".toMediaType(), meta))
+            .build()
+        val uploadUrl = client.newCall(start).execute().use { r ->
+            if (!r.isSuccessful) throw GeminiError(r.code, "file upload start failed: HTTP ${r.code}")
+            r.header("X-Goog-Upload-URL")
+                ?: throw GeminiError(r.code, "file upload start returned no upload URL")
+        }
+        val up = Request.Builder()
+            .url(uploadUrl)
+            .header("X-Goog-Upload-Command", "upload, finalize")
+            .header("X-Goog-Upload-Offset", "0")
+            .post(RequestBody.create(mime.toMediaType(), bytes))
+            .build()
+        val json = client.newCall(up).execute().use { r ->
+            val b = r.body?.string() ?: ""
+            if (!r.isSuccessful) throw GeminiError(r.code, summarizeError(b, "file upload failed: HTTP ${r.code}"))
+            b
+        }
+        var f = org.json.JSONObject(json).getJSONObject("file").let {
+            UploadedFile(it.getString("name"), it.getString("uri"), it.optString("state"))
+        }
+        // PDFs usually go ACTIVE immediately; poll briefly if still processing.
+        var polls = 0
+        while (f.state == "PROCESSING" && polls < 15) {
+            Thread.sleep(1000)
+            polls++
+            val get = Request.Builder()
+                .url("https://generativelanguage.googleapis.com/v1beta/${f.name}")
+                .header("x-goog-api-key", key).get().build()
+            client.newCall(get).execute().use { r ->
+                if (r.isSuccessful) {
+                    val o = org.json.JSONObject(r.body?.string() ?: "{}")
+                    f = UploadedFile(o.optString("name", f.name),
+                        o.optString("uri", f.uri), o.optString("state", f.state))
+                }
+            }
+        }
+        if (f.state == "FAILED") throw GeminiError(500, "file processing failed for \"$displayName\"")
+        TranscriptLog.log("upload", "${f.name} ${f.state} $displayName")
+        return f
+    }
+
+    // ------------------------------------------------------------------
 
     private fun Message.toBody() =
         GeminiBodyBuilder.Message(role, parts.map { p ->
-            GeminiBodyBuilder.Part(p.text, p.mime, p.dataB64)
+            GeminiBodyBuilder.Part(p.text, p.mime, p.dataB64, p.fileUri)
         })
 
     /**
@@ -156,6 +250,7 @@ class Gemini(
         // gemini-2.5-flash 404s for new API keys ("no longer available to new
         // users", verified 2026-09-21); Google's error recommends 3.6-flash.
         const val DEFAULT_MODEL = "gemini-3.6-flash"
+        private const val MAX_ATTEMPTS = 3
     }
 }
 
@@ -174,3 +269,12 @@ private fun summarizeError(body: String, fallback: String): String {
     }
     return listOfNotNull(code, status, msg).joinToString(" ")
 }
+
+/** Server-suggested retry delay from a 429 body's RetryInfo, in ms. */
+internal fun retryDelayMs(body: String): Long? =
+    Regex("\"retryDelay\"\\s*:\\s*\"(\\d+(?:\\.\\d+)?)s\"").find(body)
+        ?.groupValues?.get(1)?.toDoubleOrNull()?.let { (it * 1000).toLong() }
+
+/** True when the tripped quota is the per-day one — retrying is pointless. */
+internal fun isDailyQuota(body: String): Boolean =
+    body.contains("PerDay") || body.contains("per day", ignoreCase = true)

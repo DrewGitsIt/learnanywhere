@@ -48,6 +48,12 @@ class LearnAnywhereApp : Application() {
         // pdfbox-android needs its resources loaded once before any PDF parse.
         com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(applicationContext)
 
+        // Debug builds keep a Gemini request/response transcript (JSONL) —
+        // the debugger and future eval corpus (DESIGN.md §3.7).
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            com.learnanywhere.agent.TranscriptLog.dir = java.io.File(filesDir, "transcripts")
+        }
+
         prefs = getSharedPreferences("learnanywhere", MODE_PRIVATE)
         db = AppDatabase(this)
         store = DocumentStore(this)
