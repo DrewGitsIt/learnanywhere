@@ -61,7 +61,7 @@ class Gemini(
         systemInstruction: String? = null,
         temperature: Float = 0.4f,
         topP: Float = 0.95f,
-        maxTokens: Int = 1024
+        maxTokens: Int = 2048
     ): Response {
         val body = GeminiBodyBuilder.generateContent(
             contents = contents.map { m -> m.toBody() },
@@ -85,9 +85,13 @@ class Gemini(
         }
     }
 
+    // Gemini 3.x are thinking models: thought tokens count against
+    // maxOutputTokens, so tiny budgets return empty text with
+    // finishReason=MAX_TOKENS. Keep every budget comfortably above the
+    // thinking overhead.
     fun ping(): Response =
         generateText(listOf(Message("user", Part(text = "Reply with the single word OK.").let { listOf(it) })),
-            maxTokens = 8)
+            maxTokens = 256)
 
     // ------------------------------------------------------------------
 
@@ -141,7 +145,9 @@ class Gemini(
         Regex("\"$key\":(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull()
 
     companion object {
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
+        // gemini-2.5-flash 404s for new API keys ("no longer available to new
+        // users", verified 2026-09-21); Google's error recommends 3.6-flash.
+        const val DEFAULT_MODEL = "gemini-3.6-flash"
     }
 }
 

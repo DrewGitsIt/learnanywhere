@@ -76,7 +76,9 @@ class LearnAnywhereAgent(
                 Gemini.Part(mime = figure.mimeType, dataB64 = java.util.Base64.getEncoder().encodeToString(figure.bytes))
             ))
             try {
-                client.generateText(listOf(msg), systemInstruction = sys, maxTokens = 48)
+                // 48 was enough pre-thinking-models; Gemini 3.x spends thought
+                // tokens from the same budget, so give it headroom.
+                client.generateText(listOf(msg), systemInstruction = sys, maxTokens = 512)
                     .text.trim().ifBlank { "(no caption)" }
             } catch (e: Throwable) {
                 "caption failed: " + (e.message ?: "unknown")

@@ -250,7 +250,11 @@ private fun SettingsSection(ctl: UiController) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Model:")
-                listOf("gemini-2.5-flash" to "2.5 Flash", "gemini-2.5-pro" to "2.5 Pro").forEach { (id, label) ->
+                listOf(
+                    "gemini-3.6-flash" to "3.6 Flash",
+                    "gemini-3.8-flash" to "3.8 Flash",
+                    "gemini-flash-lite-latest" to "Flash-Lite",
+                ).forEach { (id, label) ->
                     AssistChip(onClick = { ctl.saveModel(id) },
                         label = { Text(label) },
                         colors = AssistChipDefaults.assistChipColors(

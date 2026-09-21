@@ -137,7 +137,7 @@ class LearnAnywhereApp : Application() {
         const val KEY_GEMINI_MODEL = "gemini_model"
         const val KEY_TTS_RATE = "tts_rate_f"
         const val KEY_GROUNDING = "use_grounding"
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
+        const val DEFAULT_MODEL = com.learnanywhere.agent.Gemini.DEFAULT_MODEL
 
         @Volatile
         var instance: LearnAnywhereApp? = null

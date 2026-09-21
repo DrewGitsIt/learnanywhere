@@ -30,6 +30,15 @@
    chunk's `onDone`. Pause/resume resumes from the current chunk.
 6. **First Play/say tap raced TTS init** — engine init is async; requests that
    arrive before `onInit` are now parked and replayed when the engine is ready.
+7. **The live 4xx root cause (2026-09-21, diagnosed against the real key)**:
+   `gemini-2.5-flash` returns a hard 404 for new API keys — "no longer
+   available to new users… use models/gemini-3.6-flash" — even though
+   ListModels still lists it. Default model is now `gemini-3.6-flash`; the
+   Settings chips offer 3.6 Flash / 3.8 Flash / Flash-Lite (all verified 200
+   with this key). Related: Gemini 3.x thinking tokens count against
+   `maxOutputTokens`, so the old tiny budgets (ping=8, caption=48) returned
+   empty text with `finishReason=MAX_TOKENS`; budgets raised (ping 256,
+   caption 512, default 2048).
 
 ## Device test (needs a real Android 14 phone + USB)
 1. `adb install -r app/build/outputs/apk/debug/app-debug.apk`

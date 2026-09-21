@@ -144,9 +144,11 @@ mic (16 kHz, foreground service)
 
 ### 3.6 Still uncertain (needs hands-on verification)
 
-1. The live `Test connection` 4xx — error text is now surfaced (STATUS.md #1);
-   diagnose from the real message. Most likely a model-id or key-restriction
-   issue, not the header form.
+1. ~~The live `Test connection` 4xx~~ — **resolved 2026-09-21**: new API keys
+   can't use `gemini-2.5-flash` at all (404 "no longer available to new
+   users"); default is now `gemini-3.6-flash`. Also: Gemini 3.x thinking
+   tokens draw from `maxOutputTokens` — small budgets return empty text
+   (STATUS.md #7).
 2. Free-tier RPM/RPD as they apply to *this* key — read from AI Studio.
 3. Streaming-zipformer accuracy against real car-cabin audio on my device.
 4. Whether device AEC is good enough for barge-in, per-device.
