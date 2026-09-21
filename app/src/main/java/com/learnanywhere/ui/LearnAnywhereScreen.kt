@@ -215,7 +215,7 @@ private fun AskSection(ctl: UiController) {
                 Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
                     Column(Modifier.padding(10.dp)) {
-                        Text(r.text, style = MaterialTheme.typography.bodyLarge)
+                        Text(r.text.ifBlank { "(empty reply)" }, style = MaterialTheme.typography.bodyLarge)
                         if (r.citedFigure != null) {
                             Spacer(Modifier.height(6.dp))
                             Text("Referenced: **Figure ${r.citedFigure}**",

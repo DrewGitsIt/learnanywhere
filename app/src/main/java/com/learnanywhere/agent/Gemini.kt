@@ -100,49 +100,40 @@ class Gemini(
             GeminiBodyBuilder.Part(p.text, p.mime, p.dataB64)
         })
 
-    private fun parse(json: String): Response {
-        // Minimal JSON reader: just what we need. (No org.json dep; avoids
-        // pulling the Android bootclass into a JVM test.)
-        val text = extractFirstJsonString(json, "parts")   // first text part of first candidate
-        val promptTokens = extractInt(json, "promptTokenCount")
-        val completionTokens = extractInt(json, "candidatesTokenCount")
-        return Response(text.orEmpty(), promptTokens, completionTokens)
-    }
-
-    /** Very-small JSON field extractor — just enough for this response shape. */
-    private fun extractFirstJsonString(json: String, key: String): String? {
-        // Find the first occurrence of `"key":[{... "text":"..." ...}]`.
-        val idx = json.indexOf("\"$key\"")
-        if (idx < 0) return null
-        val after = json.substring(idx + key.length + 3)
-        val tStart = after.indexOf("\"text\":\"")
-        if (tStart < 0) return null
-        val s = tStart + 8
+    /**
+     * Parse a generateContent response with org.json. (The REST API returns
+     * pretty-printed JSON — a substring scanner looking for `"text":"` never
+     * matches `"text": "`. Real parser, no more cleverness.) Internal so the
+     * JVM test can feed it captured response bodies.
+     */
+    internal fun parse(json: String): Response {
+        val o = org.json.JSONObject(json)
         val sb = StringBuilder()
-        var i = s
-        while (i < after.length) {
-           val c = after[i]
-            if (c == '\\' && i + 1 < after.length) {
-                val n = after[i+1]
-                when (n) {
-                    'n' -> sb.append('\n'); 't' -> sb.append('\t'); 'r' -> sb.append('\r')
-                    '"' -> sb.append('"'); '\\' -> sb.append('\\'); '/' -> sb.append('/')
-                    'u' -> {
-                        if (i+5 < after.length)
-                            sb.append(after.substring(i+2, i+6).toInt(16).toChar())
-                        i += 4
+        var finishReason: String? = null
+        o.optJSONArray("candidates")?.let { cands ->
+            if (cands.length() > 0) {
+                val c0 = cands.getJSONObject(0)
+                finishReason = c0.optString("finishReason").ifBlank { null }
+                c0.optJSONObject("content")?.optJSONArray("parts")?.let { parts ->
+                    for (i in 0 until parts.length()) {
+                        val p = parts.getJSONObject(i)
+                        if (!p.optBoolean("thought", false)) sb.append(p.optString("text"))
                     }
-                    else -> sb.append(n)
                 }
-                i += 2
-            } else if (c == '"') break
-             else { sb.append(c); i++ }
+            }
         }
-        return sb.toString()
+        val usage = o.optJSONObject("usageMetadata")
+        val text = sb.toString()
+        if (text.isBlank() && finishReason != null) {
+            // e.g. MAX_TOKENS with the whole budget spent on thinking.
+            throw GeminiError(200, "empty reply (finishReason=$finishReason)")
+        }
+        return Response(
+            text,
+            usage?.takeIf { it.has("promptTokenCount") }?.getInt("promptTokenCount"),
+            usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount")
+        )
     }
-
-    private fun extractInt(json: String, key: String): Int? =
-        Regex("\"$key\":(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull()
 
     companion object {
         // gemini-2.5-flash 404s for new API keys ("no longer available to new

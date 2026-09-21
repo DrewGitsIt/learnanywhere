@@ -168,7 +168,14 @@ mic (16 kHz, foreground service)
    rules auto-ask when you stop talking; audio never leaves the device).
    Large binaries are gitignored — run `scripts/fetch_speech_assets.sh`
    after cloning. Remaining for v1.5: VAD-gated continuous listening +
-   mic foreground service, punctuation model.
+   mic foreground service, punctuation model. Known output quirks (observed
+   on device 2026-09-21): ALL-CAPS, no punctuation, letter-split acronyms
+   ("O K") — cosmetic for the LLM; sherpa-onnx's online punctuation/casing
+   model fixes display. **Accuracy comparator (Drew's suggestion)**: the
+   same AAR ships an OfflineRecognizer that runs Whisper tiny/base and
+   Moonshine — wire one as a second pass over the finished utterance and
+   A/B it against the zipformer text before investing in a bigger
+   streaming model.
 4. **Conversation history** in `LearnAnywhereAgent` (multi-turn `contents`)
    + **search grounding** flag with rendered citations.
 5. **Voice loop v2**: streamed Gemini responses → sentence-chunked TTS,

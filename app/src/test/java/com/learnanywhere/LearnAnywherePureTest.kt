@@ -121,6 +121,58 @@ class LearnAnywherePureTest {
         assertTrue(com.learnanywhere.core.Figures.totalDeviationFromWhite(16, 34, 51) > 30)
     }
 
+    /**
+     * The REST API returns pretty-printed JSON (spaces after colons) — the
+     * old substring scanner never matched it and every reply parsed as "".
+     * This body shape is captured from a real gemini-3.6-flash response.
+     */
+    @Test
+    fun geminiParseReadsPrettyPrintedResponse() {
+        val g = com.learnanywhere.agent.Gemini({ "key" }, { "model" })
+        val body = """
+            {
+              "candidates": [
+                {
+                  "content": {
+                    "parts": [
+                      {
+                        "text": "OK"
+                      }
+                    ],
+                    "role": "model"
+                  },
+                  "finishReason": "STOP",
+                  "index": 0
+                }
+              ],
+              "usageMetadata": {
+                "promptTokenCount": 8,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 15,
+                "thoughtsTokenCount": 5
+              },
+              "modelVersion": "gemini-3.6-flash"
+            }
+        """.trimIndent()
+        val r = g.parse(body)
+        assertEquals("OK", r.text)
+        assertEquals(8, r.promptTokens)
+        assertEquals(2, r.completionTokens)
+    }
+
+    /** Empty text with a finishReason (e.g. thinking ate the budget) must throw, not return "". */
+    @Test
+    fun geminiParseThrowsOnEmptyReply() {
+        val g = com.learnanywhere.agent.Gemini({ "key" }, { "model" })
+        val body = """{ "candidates": [ { "content": {}, "finishReason": "MAX_TOKENS", "index": 0 } ] }"""
+        try {
+            g.parse(body)
+            throw AssertionError("expected GeminiError")
+        } catch (e: com.learnanywhere.agent.GeminiError) {
+            assertTrue(e.message.contains("MAX_TOKENS"))
+        }
+    }
+
     /** PDF text re-flow: de-hyphenate wraps, join lines, keep paragraphs. */
     @Test
     fun pdfTextNormalizeReflowsForTts() {
