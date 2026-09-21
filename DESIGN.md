@@ -335,3 +335,13 @@ Logic + App Check is the path if this ever ships).
 - **Gemini 3 config**: temperature at default 1.0 (docs warn lower degrades),
   thinkingLevel low, generous maxOutputTokens with length constrained via
   prompt. (2026-09-21)
+- **Google Search grounding is treated as best-effort, never required.**
+  Empirically (2026-09-21) this free-tier key has zero search-grounding
+  quota: any request with the `google_search` tool attached 429s instantly
+  (bare body — no RetryInfo, no quota name) while the identical request
+  without it succeeds, all day long, so it is not the daily reset. The agent
+  now drops the search tool on such a 429 and retries once, remembering for
+  the rest of the process; `download_document` still works from the model's
+  parametric knowledge of canonical URLs (arxiv.org/pdf/<id>). Bare 429s are
+  also no longer retried same-shape (only RetryInfo-bearing ones are).
+  Usage/limits dashboard: https://ai.dev/rate-limit. (2026-09-21)

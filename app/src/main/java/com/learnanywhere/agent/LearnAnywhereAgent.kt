@@ -41,6 +41,17 @@ class LearnAnywhereAgent(
      */
     private val history = ArrayDeque<Gemini.Message>()
 
+    /**
+     * Free-tier keys can have ZERO Google Search grounding quota: any request
+     * with the google_search tool attached 429s instantly (bare body, no
+     * RetryInfo) while identical requests without it succeed (observed
+     * 2026-09-21). Once tripped, asks drop the search tool for the rest of
+     * the process instead of failing; a restart re-probes in case quota came
+     * back.
+     */
+    @Volatile
+    private var searchQuotaTripped = false
+
     fun clearHistory() = history.clear()
 
     /** Reload history from a persisted session (role "user"/"model" + text). */
@@ -85,8 +96,8 @@ class LearnAnywhereAgent(
                 return msgs to usedFileUris
             }
 
-            val searchOn = webSearch()
-            val sys = systemPrompt(searchOn, systemExtra)
+            var searchNow = webSearch() && !searchQuotaTripped
+            var sys = systemPrompt(searchNow, systemExtra)
             val userMsg = Gemini.Message("user", listOf(Gemini.Part(text = question)))
 
             try {
@@ -99,7 +110,7 @@ class LearnAnywhereAgent(
                             client.generateTextStreamed(
                                 contents = contents,
                                 systemInstruction = sys,
-                                enableSearch = searchOn,
+                                enableSearch = searchNow,
                                 responseSchemaJson = schema,
                                 functionDeclarationsJson = decls,
                                 onDelta = onAnswerDelta)
@@ -107,23 +118,39 @@ class LearnAnywhereAgent(
                             // Mid-stream drop (code 0): finish non-streamed.
                             if (e.code == 0) client.generateText(
                                 contents = contents, systemInstruction = sys,
-                                enableSearch = searchOn, responseSchemaJson = schema,
+                                enableSearch = searchNow, responseSchemaJson = schema,
                                 functionDeclarationsJson = decls)
                             else throw e
                         }
                     } else client.generateText(
                         contents = contents,
                         systemInstruction = sys,
-                        enableSearch = searchOn,
+                        enableSearch = searchNow,
                         responseSchemaJson = schema,
                         functionDeclarationsJson = decls
                     )
                 }
 
+                // See [searchQuotaTripped]: a 429 on a search-enabled request
+                // is almost always the search-grounding quota, not the model's
+                // (plain requests keep working). Degrade and go on; if the
+                // model quota really is gone the retry 429s too and surfaces.
+                fun callDroppingSearchOn429(contents: List<Gemini.Message>): Gemini.Response =
+                    try {
+                        call(contents)
+                    } catch (e: GeminiError) {
+                        if (e.code == 429 && searchNow) {
+                            searchQuotaTripped = true
+                            searchNow = false
+                            sys = systemPrompt(false, systemExtra)
+                            call(contents)
+                        } else throw e
+                    }
+
                 val (grounding, usedFiles) = buildGrounding(inlineOnly = false)
                 var base = grounding + history.toList() + listOf(userMsg)
                 var reply = try {
-                    call(base)
+                    callDroppingSearchOn429(base)
                 } catch (e: GeminiError) {
                     when {
                         // A cached Files-API URI may have expired server-side:
@@ -133,7 +160,7 @@ class LearnAnywhereAgent(
                             base = buildGrounding(inlineOnly = true).first +
                                     history.toList() + listOf(userMsg)
                             try {
-                                call(base)
+                                callDroppingSearchOn429(base)
                             } catch (e2: GeminiError) {
                                 if (e2.code == 400) { useSchema = false; call(base) } else throw e2
                             }
@@ -164,7 +191,7 @@ class LearnAnywhereAgent(
                                     "\"name\":\"${fc.name}\",\"response\":" + result + "}}")
                     }
                     toolTurns.add(Gemini.Message("user", responses))
-                    reply = call(base + toolTurns)
+                    reply = callDroppingSearchOn429(base + toolTurns)
                 }
 
                 val parsed = ReplyJson.parse(reply.text)
@@ -268,7 +295,12 @@ class LearnAnywhereAgent(
             }
             if (tools != null) {
                 appendLine("When the user asks you to find or fetch a paper or article, locate")
-                appendLine("it (searching if needed), check list_library for duplicates, then")
+                if (searchOn) {
+                    appendLine("it (searching if needed), check list_library for duplicates, then")
+                } else {
+                    appendLine("it from URLs you know reliably (for arXiv papers use")
+                    appendLine("https://arxiv.org/pdf/<id>), check list_library for duplicates, then")
+                }
                 appendLine("call download_document with the direct URL. Confirm out loud what")
                 appendLine("was added and whether it can be read aloud.")
             }

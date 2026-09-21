@@ -1,5 +1,19 @@
 # LearnAnywhere — status
 
+## Live verification 2026-09-21 (device, real quota)
+- ✅ **Full agent flow verified end-to-end on the OnePlus 9**: text ask
+  "Find the paper Attention Is All You Need and add it to my library" →
+  SSE-streamed structured reply, two tool-loop iterations
+  (thoughtSignature/id round-trip), `download_document` fetched the 2.2 MB
+  arXiv PDF, library row created with 39.5k chars of extracted text
+  (15 pages), spoken confirmation. A mid-loop 503 ("high demand") was
+  retried automatically.
+- ✅ **Search-grounding 429 fallback verified live**: the search-enabled
+  request 429'd once (bare body), the agent immediately retried without
+  `google_search` and the session remembers the trip. See DESIGN.md §5.
+- gemini-3.6-flash was intermittently 503 "high demand" this afternoon —
+  transient Google-side congestion, unrelated to quota.
+
 ## Build status
 - ✅ JVM tests pass (`:app:testDebugUnitTest`, 6/6) — last verified before the 2026-09-20 cleanup pass
 - ✅ Debug APK builds (`:app:assembleDebug`) — same caveat

@@ -124,8 +124,12 @@ class Gemini(
                     return parse(respBody)
                 }
                 TranscriptLog.log("error(${resp.code})", respBody)
-                val retriable = (resp.code == 429 || resp.code == 503) &&
-                        attempt < MAX_ATTEMPTS && !isDailyQuota(respBody)
+                // A 429 without RetryInfo is not transient (e.g. a tool quota
+                // with limit 0, like free-tier search grounding) — retrying
+                // the same shape only burns time. 503s are always transient.
+                val retriable = attempt < MAX_ATTEMPTS && (resp.code == 503 ||
+                        (resp.code == 429 && !isDailyQuota(respBody) &&
+                                retryDelayMs(respBody) != null))
                 if (!retriable) {
                     val msg = if (resp.code == 429 && isDailyQuota(respBody))
                         "daily free-tier quota exhausted (resets midnight Pacific)"
@@ -266,8 +270,11 @@ class Gemini(
             if (!resp.isSuccessful) {
                 val b = resp.use { it.body?.string() ?: "" }
                 TranscriptLog.log("error(${resp.code})", b)
-                val retriable = (resp.code == 429 || resp.code == 503) &&
-                        attempt < MAX_ATTEMPTS && !isDailyQuota(b)
+                // Same rule as generateText: bare 429s (no RetryInfo) are
+                // permanent for this request shape — fail fast.
+                val retriable = attempt < MAX_ATTEMPTS && (resp.code == 503 ||
+                        (resp.code == 429 && !isDailyQuota(b) &&
+                                retryDelayMs(b) != null))
                 if (!retriable) {
                     val msg = if (resp.code == 429 && isDailyQuota(b))
                         "daily free-tier quota exhausted (resets midnight Pacific)"
