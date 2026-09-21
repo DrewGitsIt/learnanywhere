@@ -47,12 +47,33 @@ class UiController(
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
+    // ---- voice input (on-device ASR; DESIGN.md §3.1) ----
+    val voice = com.learnanywhere.speech.VoiceInput(app.applicationContext)
+    val voiceState = mutableStateOf(com.learnanywhere.speech.VoiceInput.State.IDLE)
+    val voicePartial = mutableStateOf("")
+
     init {
         scope.launch {
             player.stateFlow.collect { s ->
                 isPlaying.value = s.isPlaying
                 if (s.error != null) error.value = s.error
             }
+        }
+        scope.launch { voice.state.collect { voiceState.value = it } }
+        scope.launch { voice.partial.collect { voicePartial.value = it } }
+        scope.launch { voice.error.collect { if (it != null) error.value = it } }
+    }
+
+    /**
+     * Push-to-talk: tap starts listening (live partials in the Ask field);
+     * the utterance auto-asks when the endpointer fires, or tap again to
+     * finish early with whatever was recognized.
+     */
+    fun toggleVoice() {
+        if (voiceState.value == com.learnanywhere.speech.VoiceInput.State.IDLE) {
+            voice.start { text -> ask(text) }
+        } else {
+            voice.stop()
         }
     }
 

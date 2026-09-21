@@ -52,6 +52,12 @@
    continues mid-doc, next/prev/speed work
 7. Kill the app, reopen → library should persist (Room)
 8. (Android Auto) — app should now appear in AA's media apps list
+9. **Voice input** (2026-09-21): tap **🎤 Speak** in Ask → grant mic →
+   first tap loads the model (a few seconds, "⏳ Loading…") → speak a
+   question → partials appear live in the field → stopping talking for
+   ~1.2 s auto-asks (or tap ◼ Stop to finish early). All recognition is
+   on-device (sherpa-onnx zipformer int8). After cloning fresh, run
+   `scripts/fetch_speech_assets.sh` before building.
 
 ## Known limitations (not bugs, but the honest state)
 - ~~PDF audiobook is silent~~ — **fixed 2026-09-21**: pdfbox-android extracts

@@ -156,20 +156,59 @@ private fun DocsSection(ctl: UiController, onAddPdf: () -> Unit, onAddUrl: () ->
 @Composable
 private fun AskSection(ctl: UiController) {
     var q by remember { mutableStateOf("") }
+    val voiceState = ctl.voiceState.value
+    // Mirror live on-device speech partials into the question field.
+    LaunchedEffect(ctl.voicePartial.value) {
+        if (ctl.voicePartial.value.isNotBlank()) q = ctl.voicePartial.value
+    }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val micPermission = rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) ctl.toggleVoice()
+        else Toast.makeText(ctx, "Voice input needs the microphone (audio stays on-device).", Toast.LENGTH_LONG).show()
+    }
     Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Ask the agent", style = MaterialTheme.typography.titleLarge)
             OutlinedTextField(
                 value = q, onValueChange = { q = it },
-                label = { Text("Ask about your documents…") },
+                label = { Text(if (voiceState == com.learnanywhere.speech.VoiceInput.State.LISTENING)
+                    "Listening… speak your question" else "Ask about your documents…") },
                 placeholder = { Text("e.g. What does Figure 2 show?") },
                 minLines = 2, maxLines = 3,
                 modifier = Modifier.fillMaxWidth()
             )
-            Button(onClick = { if (q.isNotBlank()) { ctl.ask(q); q = "" } },
-                enabled = !ctl.busy.value,
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.align(Alignment.End)) {
-                Text(if (ctl.busy.value) "Thinking…" else "Ask")
+                // Push-to-talk: on-device ASR, auto-asks when you stop talking.
+                Button(
+                    onClick = {
+                        if (voiceState != com.learnanywhere.speech.VoiceInput.State.IDLE) {
+                            ctl.toggleVoice()
+                        } else if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                ctx, android.Manifest.permission.RECORD_AUDIO) ==
+                            android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            ctl.toggleVoice()
+                        } else {
+                            micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (voiceState == com.learnanywhere.speech.VoiceInput.State.LISTENING)
+                            MaterialTheme.colorScheme.errorContainer
+                        else MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Text(when (voiceState) {
+                        com.learnanywhere.speech.VoiceInput.State.IDLE -> "🎤 Speak"
+                        com.learnanywhere.speech.VoiceInput.State.LOADING -> "⏳ Loading…"
+                        com.learnanywhere.speech.VoiceInput.State.LISTENING -> "◼ Stop"
+                    })
+                }
+                Button(onClick = { if (q.isNotBlank()) { ctl.ask(q); q = "" } },
+                    enabled = !ctl.busy.value) {
+                    Text(if (ctl.busy.value) "Thinking…" else "Ask")
+                }
             }
 
             ctl.reply.value?.let { r ->

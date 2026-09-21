@@ -14,6 +14,11 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        // Dev builds target the attached arm64 phone only; drop this filter
+        // (or add x86_64) if you need an emulator image. Halves APK size —
+        // the sherpa-onnx AAR ships native libs for 4 ABIs.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
@@ -66,6 +71,10 @@ dependencies {
 
     // Offline PDF text extraction (lets the audiobook read PDFs aloud)
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
+    // On-device speech recognition (sherpa-onnx; AAR fetched by
+    // scripts/fetch_speech_assets.sh — not in git)
+    implementation(fileTree("libs") { include("*.aar") })
 
     // Room (KSP) for library persistence
     implementation("androidx.room:room-runtime:2.6.1")

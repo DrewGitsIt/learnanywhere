@@ -162,9 +162,13 @@ mic (16 kHz, foreground service)
 2. ~~PDF text extraction~~ — **done 2026-09-21** (pdfbox-android 2.0.27.0,
    `data/PdfText.kt`, add-time extraction + cold-start backfill). Scanned
    PDFs remain text-less (would need OCR — ML Kit on-device is an option).
-3. **Voice input v1**: sherpa-onnx AAR + Silero VAD + streaming zipformer
-   int8; push-to-talk first, then VAD-gated continuous. Live partials shown
-   in the UI (start of the "mirror").
+3. **Voice input v1** — **push-to-talk shipped 2026-09-21**
+   (`speech/VoiceInput.kt`: sherpa-onnx 1.13.8 AAR + streaming zipformer
+   int8 from assets; live partials mirrored into the Ask field; endpoint
+   rules auto-ask when you stop talking; audio never leaves the device).
+   Large binaries are gitignored — run `scripts/fetch_speech_assets.sh`
+   after cloning. Remaining for v1.5: VAD-gated continuous listening +
+   mic foreground service, punctuation model.
 4. **Conversation history** in `LearnAnywhereAgent` (multi-turn `contents`)
    + **search grounding** flag with rendered citations.
 5. **Voice loop v2**: streamed Gemini responses → sentence-chunked TTS,
