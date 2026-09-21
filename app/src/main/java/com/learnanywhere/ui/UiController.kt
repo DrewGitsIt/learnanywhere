@@ -67,6 +67,12 @@ class UiController(
     val webSearch = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_WEB_SEARCH, true))
     /** Voice loop: speak agent replies aloud (default on — this is a voice app). */
     val speakReplies = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_SPEAK_REPLIES, true))
+    /** Voice loop v2: interrupt playback by just speaking (Silero VAD watches the mic). */
+    val bargeIn = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_BARGE_IN, true))
+    /** Live text of the reply currently streaming in (null when idle). */
+    val streamingAnswer = mutableStateOf<String?>(null)
+
+    private val barge = com.learnanywhere.speech.BargeInGuard(app.applicationContext)
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
@@ -85,10 +91,11 @@ class UiController(
                 isPlaying.value = s.isPlaying
                 playback.value = s
                 if (s.error != null) error.value = s.error
+                updateBargeGuard()
             }
         }
         scope.launch { app.db.db.conversations().observe().collect { sessions.value = it } }
-        scope.launch { voice.state.collect { voiceState.value = it } }
+        scope.launch { voice.state.collect { voiceState.value = it; updateBargeGuard() } }
         scope.launch { voice.partial.collect { voicePartial.value = it } }
         scope.launch { voice.error.collect { if (it != null) error.value = it } }
         scope.launch { voice.lastZipformer.collect { lastZipformer.value = it } }
@@ -103,13 +110,34 @@ class UiController(
      */
     fun toggleVoice() {
         if (voiceState.value == com.learnanywhere.speech.VoiceInput.State.IDLE) {
-            // Barge-in (v1): opening the mic silences any playing TTS so the
-            // recognizer doesn't transcribe our own voice output.
+            // Opening the mic silences any playing TTS so the recognizer
+            // doesn't transcribe our own voice output.
+            barge.stop()
             player.pause()
             voice.start { text -> ask(text) }
         } else {
             voice.stop()
         }
+    }
+
+    /**
+     * Voice loop v2: while TTS is speaking and the mic is idle, Silero VAD
+     * watches for the user's voice; speech pauses playback and opens the
+     * recognizer — interrupt the app by just talking.
+     */
+    private fun updateBargeGuard() {
+        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            app.applicationContext, android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        val shouldRun = playback.value.isPlaying && bargeIn.value && micGranted &&
+                voiceState.value == com.learnanywhere.speech.VoiceInput.State.IDLE
+        if (shouldRun) barge.start { toggleVoice() } else barge.stop()
+    }
+
+    fun toggleBargeIn(v: Boolean) {
+        bargeIn.value = v
+        app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_BARGE_IN, v).apply()
+        updateBargeGuard()
     }
 
     // ------------------------------------------------------------------
@@ -169,11 +197,31 @@ class UiController(
             question.value = q
             thread.value = thread.value + ChatTurn("user", q)
             try {
+                // Voice loop v2: stream the reply — extract the answer field
+                // from the structured JSON as it arrives, chunk into
+                // sentences, and start speaking before the model finishes.
+                val extractor = com.learnanywhere.core.StreamingAnswerExtractor()
+                val chunker = com.learnanywhere.core.SentenceChunker()
+                var spoke = false
+                val speak = speakReplies.value
+                val onDelta: ((String) -> Unit)? = if (speak) { d ->
+                    val t = extractor.feed(d)
+                    if (t.isNotEmpty()) {
+                        streamingAnswer.value = (streamingAnswer.value ?: "") + t
+                        chunker.feed(t).forEach { s ->
+                            player.enqueueSay(s, flush = !spoke); spoke = true
+                        }
+                    }
+                } else null
+
                 val reply = if (useGrounding.value) {
-                    app.agent.ask(q)
+                    app.agent.ask(q, onAnswerDelta = onDelta)
                 } else {
-                    app.agent.ask(q, systemExtra = "Ignore attached documents; answer from general knowledge and tag (general).")
+                    app.agent.ask(q,
+                        systemExtra = "Ignore attached documents; answer from general knowledge and tag (general).",
+                        onAnswerDelta = onDelta)
                 }
+                chunker.flush()?.let { if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true } }
                 this@UiController.reply.value = reply
                 val citedTitle = reply.citedDocId?.let { id ->
                     app.store.byId(id)?.title
@@ -181,16 +229,16 @@ class UiController(
                 thread.value = thread.value + ChatTurn(
                     "model", reply.text, citedTitle, reply.citedFigure, reply.sources)
                 persistTurn(q, reply.text, citedTitle, reply.citedFigure, reply.sources)
-                // Voice loop: the answer is spoken (the whole point of the
-                // app). sayOnce QUEUE_FLUSHes, so a new reply interrupts a
-                // previous one.
-                if (speakReplies.value && reply.text.isNotBlank()) {
+                // Fallback: nothing streamed (schema fallback, tool-only
+                // rounds, or stream failure) — speak the final text whole.
+                if (speak && !spoke && reply.text.isNotBlank()) {
                     player.sayOnce(reply.text)
                 }
             } catch (t: Throwable) {
                 error.value = t.message ?: t.toString()
             } finally {
                 busy.value = false
+                streamingAnswer.value = null
             }
         }
     }

@@ -43,3 +43,9 @@ fi
 
 echo "Speech assets ready:"
 ls -la app/libs app/src/main/assets/asr
+
+if [ ! -f app/src/main/assets/asr/silero_vad.onnx ]; then
+  echo "Fetching Silero VAD model (~0.6 MB)…"
+  curl -fL -o app/src/main/assets/asr/silero_vad.onnx \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+fi

@@ -42,8 +42,8 @@ class AudiobookPlayer(
     private var chunkIdx = 0
     /** Utterance id of the LAST chunk of the current document; null in sayOnce mode. */
     private var finalUtteranceOfDoc: String? = null
-    /** A sayOnce() that arrived before the engine was ready. */
-    private var pendingSay: String? = null
+    /** sayOnce()/enqueueSay() texts that arrived before the engine was ready. */
+    private val pendingSay = ArrayList<String>()
 
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
@@ -127,8 +127,39 @@ class AudiobookPlayer(
      * used by the in-car "ask" and "figures" spoken surfaces.
      */
     fun sayOnce(text: String) {
-        initIfNeeded()
-        if (state.value.ready) speakSingle(text) else pendingSay = text
+        scope.launch {
+            initIfNeeded()
+            if (state.value.ready) speakSingle(text)
+            else { pendingSay.clear(); pendingSay.add(text) }
+        }
+    }
+
+    /**
+     * Voice loop v2: progressively speak streamed sentences. flush=true on
+     * the first sentence of a reply (interrupts whatever was playing);
+     * subsequent sentences QUEUE_ADD behind it. Safe to call from any
+     * thread (hops to the main-thread scope).
+     */
+    fun enqueueSay(text: String, flush: Boolean) {
+        if (text.isBlank()) return
+        scope.launch {
+            initIfNeeded()
+            if (!state.value.ready) {
+                if (flush) pendingSay.clear()
+                pendingSay.add(text)
+                return@launch
+            }
+            clearChunks()   // sayOnce mode: no doc-advance on done
+            val id = UUID.randomUUID().toString()
+            publish { it.copy(activeUtterance = id, activeTextPreview = truncate(text, 96)) }
+            try {
+                tts?.speak(text,
+                    if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                    null, id)
+            } catch (t: Throwable) {
+                publish { it.copy(error = t.message) }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -143,10 +174,14 @@ class AudiobookPlayer(
             // Replay whatever was requested while the engine was initialising.
             scope.launch {
                 applyVoiceConfig("en-US", state.value.rate)
-                val say = pendingSay
-                pendingSay = null
-                if (say != null) speakSingle(say)
-                else if (state.value.queue.isNotEmpty()) playCurrent()
+                if (pendingSay.isNotEmpty()) {
+                    val queued = pendingSay.toList()
+                    pendingSay.clear()
+                    queued.forEachIndexed { i, s ->
+                        if (i == 0) speakSingle(s)
+                        else tts?.speak(s, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+                    }
+                } else if (state.value.queue.isNotEmpty()) playCurrent()
             }
         } else {
             publish { it.copy(ready = false, error = "TTS init failed: $status") }

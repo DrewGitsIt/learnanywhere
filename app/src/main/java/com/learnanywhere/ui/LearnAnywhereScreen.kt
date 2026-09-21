@@ -214,11 +214,14 @@ private fun EmptyState(
                 textAlign = TextAlign.Center)
         }
 
-        if (ctl.thread.value.isNotEmpty()) {
+        if (ctl.thread.value.isNotEmpty() || ctl.streamingAnswer.value != null) {
             Spacer(Modifier.height(20.dp))
             Column(verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()) {
                 ctl.thread.value.forEach { turn -> TurnBubble(turn) }
+                ctl.streamingAnswer.value?.let { live ->
+                    TurnBubble(UiController.ChatTurn("model", live))
+                }
             }
         }
         ctl.error.value?.let {
@@ -290,6 +293,10 @@ private fun LibraryState(
         item { AskCard(ctl) }
         if (ctl.thread.value.isNotEmpty()) {
             items(ctl.thread.value) { turn -> TurnBubble(turn) }
+        }
+        // Live bubble while the reply streams in (spoken as it arrives).
+        ctl.streamingAnswer.value?.let { live ->
+            item { TurnBubble(UiController.ChatTurn("model", live)) }
         }
         ctl.error.value?.let {
             item {
@@ -861,6 +868,11 @@ private fun SettingsSheet(ctl: UiController, onClose: () -> Unit) {
                 subtitle = "Read the agent's answers aloud",
                 checked = ctl.speakReplies.value,
                 onChange = { ctl.toggleSpeakReplies(it) })
+            SettingSwitch(
+                title = "Voice interrupt",
+                subtitle = "While it's talking, just speak to interrupt (on-device VAD)",
+                checked = ctl.bargeIn.value,
+                onChange = { ctl.toggleBargeIn(it) })
             SettingSwitch(
                 title = "Web search",
                 subtitle = "Let the agent search Google for ancillary info",

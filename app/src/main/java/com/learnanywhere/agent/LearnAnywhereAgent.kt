@@ -56,7 +56,12 @@ class LearnAnywhereAgent(
         appCtx.getSharedPreferences("learnanywhere_files", Context.MODE_PRIVATE)
     }
 
-    suspend fun ask(question: String, systemExtra: String? = null): AgentReply =
+    suspend fun ask(
+        question: String,
+        systemExtra: String? = null,
+        /** Voice loop v2: raw text deltas as the reply streams (SSE). */
+        onAnswerDelta: ((String) -> Unit)? = null
+    ): AgentReply =
         withContext(Dispatchers.IO) {
             val client = Gemini(api, model)
             val docsHere = docs()
@@ -86,14 +91,34 @@ class LearnAnywhereAgent(
 
             try {
                 var useSchema = true
-                fun call(contents: List<Gemini.Message>) =
-                    client.generateText(
+                fun call(contents: List<Gemini.Message>): Gemini.Response {
+                    val schema = if (useSchema) RESPONSE_SCHEMA else null
+                    val decls = tools?.declarationsJson
+                    return if (onAnswerDelta != null) {
+                        try {
+                            client.generateTextStreamed(
+                                contents = contents,
+                                systemInstruction = sys,
+                                enableSearch = searchOn,
+                                responseSchemaJson = schema,
+                                functionDeclarationsJson = decls,
+                                onDelta = onAnswerDelta)
+                        } catch (e: GeminiError) {
+                            // Mid-stream drop (code 0): finish non-streamed.
+                            if (e.code == 0) client.generateText(
+                                contents = contents, systemInstruction = sys,
+                                enableSearch = searchOn, responseSchemaJson = schema,
+                                functionDeclarationsJson = decls)
+                            else throw e
+                        }
+                    } else client.generateText(
                         contents = contents,
                         systemInstruction = sys,
                         enableSearch = searchOn,
-                        responseSchemaJson = if (useSchema) RESPONSE_SCHEMA else null,
-                        functionDeclarationsJson = tools?.declarationsJson
+                        responseSchemaJson = schema,
+                        functionDeclarationsJson = decls
                     )
+                }
 
                 val (grounding, usedFiles) = buildGrounding(inlineOnly = false)
                 var base = grounding + history.toList() + listOf(userMsg)

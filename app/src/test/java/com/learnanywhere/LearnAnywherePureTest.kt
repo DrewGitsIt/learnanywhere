@@ -297,6 +297,37 @@ class LearnAnywherePureTest {
         }
     }
 
+    /** Voice loop v2: streamed JSON answers are extracted incrementally. */
+    @Test
+    fun streamingAnswerExtractorHandlesJsonAndPlain() {
+        // JSON reply split across awkward delta boundaries.
+        val e = com.learnanywhere.core.StreamingAnswerExtractor()
+        val out = StringBuilder()
+        listOf("{\"ans", "wer\": \"Hel", "lo \\\"world\\\".", " Bye.\", \"cited_docum",
+               "ent\": \"X\"}").forEach { out.append(e.feed(it)) }
+        assertEquals("Hello \"world\". Bye.", out.toString())
+        assertTrue(e.answerComplete)
+
+        // Plain prose (schema fallback) passes straight through.
+        val p = com.learnanywhere.core.StreamingAnswerExtractor()
+        assertEquals("Plain ", p.feed("Plain "))
+        assertEquals("prose.", p.feed("prose."))
+    }
+
+    /** Voice loop v2: sentence chunking for progressive TTS. */
+    @Test
+    fun sentenceChunkerEmitsCompleteSentences() {
+        val c = com.learnanywhere.core.SentenceChunker()
+        assertEquals(emptyList<String>(), c.feed("The encoder has"))
+        assertEquals(listOf("The encoder has six layers."), c.feed(" six layers. The de"))
+        assertEquals(listOf("The decoder mirrors it."), c.feed("coder mirrors it. And"))
+        assertEquals("And", c.flush())
+        // Decimals don't split sentences.
+        val d = com.learnanywhere.core.SentenceChunker()
+        assertEquals(emptyList<String>(), d.feed("It weighs 3.5 kg"))
+        assertEquals(listOf("It weighs 3.5 kg total."), d.feed(" total. Next"))
+    }
+
     /** PDF text re-flow: de-hyphenate wraps, join lines, keep paragraphs. */
     @Test
     fun pdfTextNormalizeReflowsForTts() {

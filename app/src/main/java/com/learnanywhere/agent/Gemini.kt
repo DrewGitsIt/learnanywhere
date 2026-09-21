@@ -219,7 +219,120 @@ class Gemini(
      * matches `"text": "`. Real parser, no more cleverness.) Internal so the
      * JVM test can feed it captured response bodies.
      */
-    internal fun parse(json: String): Response {
+    /**
+     * Streamed variant: POSTs to `:streamGenerateContent?alt=sse` and calls
+     * [onDelta] with each text fragment as it arrives (thought parts and
+     * functionCall parts produce no deltas). Returns the same accumulated
+     * [Response] shape as [generateText]. Retries only before the stream
+     * starts; a mid-stream drop throws GeminiError(0, …) — callers fall back
+     * to the non-streamed path.
+     */
+    fun generateTextStreamed(
+        contents: List<Message>,
+        systemInstruction: String? = null,
+        temperature: Float = 1.0f,
+        topP: Float = 0.95f,
+        maxTokens: Int = 4096,
+        enableSearch: Boolean = false,
+        thinkingLevel: String? = "low",
+        responseSchemaJson: String? = null,
+        functionDeclarationsJson: String? = null,
+        onDelta: (String) -> Unit
+    ): Response {
+        val body = GeminiBodyBuilder.generateContent(
+            contents = contents.map { m -> m.toBody() },
+            systemInstruction = systemInstruction,
+            temperature = temperature,
+            topP = topP,
+            maxOutputTokens = maxTokens,
+            enableGoogleSearch = enableSearch,
+            thinkingLevel = thinkingLevel,
+            responseSchemaJson = responseSchemaJson,
+            functionDeclarationsJson = functionDeclarationsJson
+        )
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+                (model().ifBlank { DEFAULT_MODEL }) + ":streamGenerateContent?alt=sse"
+        val req = Request.Builder()
+            .url(url)
+            .header("x-goog-api-key", apiKey().ifBlank { throw IllegalStateException("No API key") })
+            .post(RequestBody.create("application/json".toMediaType(), body.toByteArray(java.nio.charset.StandardCharsets.UTF_8)))
+            .build()
+        TranscriptLog.log("request(stream)", body)
+
+        var attempt = 0
+        while (true) {
+            attempt++
+            val resp = client.newCall(req).execute()
+            if (!resp.isSuccessful) {
+                val b = resp.use { it.body?.string() ?: "" }
+                TranscriptLog.log("error(${resp.code})", b)
+                val retriable = (resp.code == 429 || resp.code == 503) &&
+                        attempt < MAX_ATTEMPTS && !isDailyQuota(b)
+                if (!retriable) {
+                    val msg = if (resp.code == 429 && isDailyQuota(b))
+                        "daily free-tier quota exhausted (resets midnight Pacific)"
+                    else summarizeError(b, "HTTP ${resp.code}")
+                    throw GeminiError(resp.code, msg)
+                }
+                val backoff = 1000L shl (attempt - 1)
+                Thread.sleep(maxOf(retryDelayMs(b) ?: 0L, backoff)
+                    .coerceAtMost(30_000L) + (0..250).random())
+                continue
+            }
+            // Stream started — accumulate chunks.
+            val sb = StringBuilder()
+            val fcalls = ArrayList<FunctionCall>()
+            val rawParts = ArrayList<String>()
+            val sources = LinkedHashSet<String>()
+            var promptTokens: Int? = null
+            var completionTokens: Int? = null
+            var finishReason: String? = null
+            try {
+                resp.use { r ->
+                    val source = r.body?.source() ?: throw GeminiError(0, "empty stream body")
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val payload = line.removePrefix("data:").trim()
+                        if (payload.isEmpty() || payload == "[DONE]") continue
+                        val c = parseInternal(payload, requireText = false)
+                        if (c.text.isNotEmpty()) { sb.append(c.text); onDelta(c.text) }
+                        fcalls.addAll(c.functionCalls)
+                        rawParts.addAll(c.rawParts)
+                        sources.addAll(c.sources)
+                        c.promptTokens?.let { promptTokens = it }
+                        c.completionTokens?.let { completionTokens = it }
+                        c.finishReason?.let { finishReason = it }
+                    }
+                }
+            } catch (e: java.io.IOException) {
+                throw GeminiError(0, "stream interrupted: ${e.message}")
+            }
+            TranscriptLog.log("response(stream)", sb.toString().take(2000))
+            if (sb.isBlank() && fcalls.isEmpty() && finishReason != null) {
+                throw GeminiError(200, "empty reply (finishReason=$finishReason)")
+            }
+            return Response(sb.toString(), promptTokens, completionTokens,
+                sources.toList(), fcalls, rawParts)
+        }
+    }
+
+    internal fun parse(json: String): Response = parseInternal(json, requireText = true).toResponse()
+
+    private class Accum(
+        val text: String,
+        val promptTokens: Int?,
+        val completionTokens: Int?,
+        val sources: List<String>,
+        val functionCalls: List<FunctionCall>,
+        val rawParts: List<String>,
+        val finishReason: String?
+    ) {
+        fun toResponse() = Response(text, promptTokens, completionTokens,
+            sources, functionCalls, rawParts)
+    }
+
+    private fun parseInternal(json: String, requireText: Boolean): Accum {
         val o = org.json.JSONObject(json)
         val sb = StringBuilder()
         var finishReason: String? = null
@@ -259,17 +372,18 @@ class Gemini(
         }
         val usage = o.optJSONObject("usageMetadata")
         val text = sb.toString()
-        if (text.isBlank() && fcalls.isEmpty() && finishReason != null) {
+        if (requireText && text.isBlank() && fcalls.isEmpty() && finishReason != null) {
             // e.g. MAX_TOKENS with the whole budget spent on thinking.
             throw GeminiError(200, "empty reply (finishReason=$finishReason)")
         }
-        return Response(
+        return Accum(
             text,
             usage?.takeIf { it.has("promptTokenCount") }?.getInt("promptTokenCount"),
             usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount"),
             sources,
             fcalls,
-            rawParts
+            rawParts,
+            finishReason
         )
     }
 
