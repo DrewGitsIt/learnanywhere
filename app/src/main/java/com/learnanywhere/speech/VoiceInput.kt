@@ -81,7 +81,10 @@ class VoiceInput(
                     joiner = "asr/joiner.int8.onnx",
                 ),
                 tokens = "asr/tokens.txt",
-                modelType = "zipformer",
+                // The en-2023-06-26 chunk-16-left-128 export is a zipformer2
+                // model; "zipformer" selects the v1 loader, which aborts
+                // natively ('attention_dims' missing from metadata).
+                modelType = "zipformer2",
                 numThreads = 2,
             ),
             endpointConfig = EndpointConfig(
