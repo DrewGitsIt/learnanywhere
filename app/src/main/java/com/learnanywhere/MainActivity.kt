@@ -13,6 +13,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val app = LearnAnywhereApp.get()
         val controller = app.ui
-        setContent { LearnAnywhereScreen(controller) }
+        setContent {
+            com.learnanywhere.ui.LearnAnywhereTheme {
+                LearnAnywhereScreen(controller)
+            }
+        }
     }
 }

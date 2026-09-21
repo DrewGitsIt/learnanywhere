@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Compose draws the whole UI; the window theme only controls the
+         pre-Compose frame (cold-start background, status bar defaults). -->
     <style name="Theme.LearnAnywhere" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:colorPrimary">#0F2A43</item>
-        <item name="android:colorAccent">#2E86DE</item>
-        <item name="android:statusBarColor">#0F2A43</item>
-        <item name="android:windowBackground">#F5F7FA</item>
+        <item name="android:windowBackground">#FDF8FD</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

@@ -41,6 +41,8 @@ class UiController(
     val player = AudiobookPlayer(app.applicationContext) { app.store.docs }
     val isPlaying = mutableStateOf(false)
     val rate = mutableStateOf(app.prefs.getFloat(LearnAnywhereApp.KEY_TTS_RATE, 1.0f))
+    /** Full playback state mirrored for the now-playing surface (presentation only). */
+    val playback = mutableStateOf(com.learnanywhere.audio.PlaybackState())
 
     // ---- settings ----
     val useGrounding = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_GROUNDING, true))
@@ -63,6 +65,7 @@ class UiController(
         scope.launch {
             player.stateFlow.collect { s ->
                 isPlaying.value = s.isPlaying
+                playback.value = s
                 if (s.error != null) error.value = s.error
             }
         }
