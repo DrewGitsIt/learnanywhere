@@ -10,6 +10,12 @@
 tier, no credit card) · **TTS:** Android `TextToSpeech` (on-device, always
 free) · **In-car:** stable `MediaBrowserService` Android Auto bridge.
 
+> **Where this is going:** the end state is a fully *vocal* interface (local,
+> private ASR in; spoken responses out; the screen mirrors the conversation).
+> See **DESIGN.md** for the vision, researched decisions (local ASR stack,
+> free-tier terms, voice-loop architecture), and roadmap. **STATUS.md** tracks
+> build state and known bugs.
+
 ---
 
 ## 1. Why build, not point at an existing app?
@@ -26,10 +32,14 @@ You asked for a free Android-14 app that, in one place:
 No single free app covers the whole loop — so we build it. The two load-bearing
 facts that make the build *viable and free* are:
 
-* **Gemini free tier** = no credit card, `gemini-2.5-flash` at ~10 RPM /
-  ~250 req/day, and it accepts **inline PDFs up to 50 MB / 1000 pages** in the
-  request body. That's the whole "read my paper → ask → name the figure" loop,
-  with no paid API.
+* **Gemini free tier** = no credit card, Flash models at ~10 RPM (daily quota
+  is volatile — check https://aistudio.google.com/rate-limit, don't hard-code
+  it). PDFs go **inline up to ~20 MB total request size**; larger files (up to
+  50 MB / 1,000 pages) need the also-free Files API. That's the whole "read my
+  paper → ask → name the figure" loop, with no paid API.
+  ⚠️ *Privacy:* outside the EEA/UK/Switzerland, free-tier prompts and attached
+  documents may be used to train Google's models and may be human-reviewed.
+  See DESIGN.md §privacy.
 * **Android 14** ships `android.speech.tts` with `UtteranceProgressListener`
   (per-utterance play/pause/progress) and a modern `MediaBrowserService`
   surface — so the in-car "media app" bridge is stable and doesn't depend on a
@@ -131,7 +141,7 @@ learnanywhere/
     ├── proguard-rules.pro
     └── src/main/
         ├── AndroidManifest.xml
-        ├── res/ (values/strings.xml, values/themes.xml, xml/car_app_config.xml,
+        ├── res/ (values/strings.xml, values/themes.xml, xml/automotive_app_desc.xml,
         │        drawable/ic_launcher_vehicle.xml)
         └── java/com/learnanywhere/
             ├── LearnAnywhereApp.kt          # Application; wires store, agent, shared player
@@ -146,10 +156,9 @@ learnanywhere/
             ├── car/
             │   └── LearnStudyMediaService.kt  # android:media.browse bridge; ask + figures + docs-as-media
             ├── core/
-            │   ├── GeminiBodyBuilder.kt  # (pure) body shape — unit-tested
+            │   ├── GeminiBodyBuilder.kt  # (pure) body shape + UrlText.stripHtml — unit-tested
             │   ├── Figures.kt            # (pure) (a) feature: imageRatioScore + captionPrompt — unit-tested
-            │   ├── Http.kt               # URL fetch (okhttp)
-            │   └── UrlText.kt            # (pure) strip — unit-tested
+            │   └── Http.kt               # URL fetch (okhttp)
             ├── data/
             │   ├── Document.kt           # PDF|TEXT|URL + Figure (with caption + figure-candidate)
             │   ├── PdfFigureExtractor.kt # PDF -> bitmap figures + per-page figure candidate score
@@ -236,9 +245,10 @@ Remaining (priority order):
    reliable in-car path and now carries ask + figures. A richer CALS skin
    (custom in-car list UI) is the follow-up — I omitted it because the
    `androidx.car.app` API moved between 1.3 and 1.5. ~200–400 LOC.
-4. **Free-tier privacy** (your call): Google's free tier *may* use attached
-   documents to improve its models. Fine for open-source papers; for NDA /
-   unpublished work prefer a paid key.
+4. **Free-tier privacy**: confirmed (2026-09-20) — Google's unpaid tier *does*
+   use prompts and attached documents for model improvement, with possible
+   human review (EEA/UK/CH excepted). Fine for open papers; for NDA /
+   unpublished work use a paid key or the Groq path. Details in DESIGN.md §3.3.
 5. **Room schema migrations**: v1 ships with `exportSchema = false` and
    `fallbackToDestructiveMigration()`. Before shipping, add a proper v1→v2
    path + `schemas/` export.

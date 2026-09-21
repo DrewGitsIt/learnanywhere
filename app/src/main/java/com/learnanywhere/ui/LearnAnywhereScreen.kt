@@ -240,6 +240,14 @@ private fun SettingsSection(ctl: UiController) {
             )
             Button(onClick = { ctl.testConnection() },
                 modifier = Modifier.align(Alignment.End)) { Text("Test connection") }
+            ctl.info.value?.let {
+                Text(it, color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodyMedium)
+            }
+            ctl.error.value?.let {
+                Text(it, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Model:")
                 listOf("gemini-2.5-flash" to "2.5 Flash", "gemini-2.5-pro" to "2.5 Pro").forEach { (id, label) ->

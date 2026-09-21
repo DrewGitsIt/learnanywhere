@@ -45,7 +45,11 @@
             </intent-filter>
         </service>
 
-        <!-- Advertise LearnStudy as a media-style companion for Android Auto. -->
+        <!-- Advertise LearnAnywhere as a media app to Android Auto. Required:
+             AA only surfaces apps that carry this meta-data. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
 
     </application>
 </manifest>

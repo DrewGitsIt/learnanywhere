@@ -34,6 +34,8 @@ class UiController(
     val reply = mutableStateOf<com.learnanywhere.agent.LearnAnywhereAgent.AgentReply?>(null)
     val busy = mutableStateOf(false)
     val error = mutableStateOf<String?>(null)
+    /** Non-error status line (e.g. "Connected ✔") shown in Settings. */
+    val info = mutableStateOf<String?>(null)
 
     // ---- player ----
     val player = AudiobookPlayer(app.applicationContext) { app.store.docs }
@@ -58,8 +60,10 @@ class UiController(
     // Document actions
 
     fun addPdf(uri: Uri) = scope.launch(Dispatchers.IO) {
+        // addPdf returns a Result — getOrThrow() so failures reach the catch
+        // instead of vanishing inside the Result.
         try {
-            app.store.addPdf(uri)
+            app.store.addPdf(uri).getOrThrow()
             refreshFromStore()
         } catch (t: Throwable) {
             error.value = "Couldn't add PDF: ${t.message}"
@@ -72,8 +76,12 @@ class UiController(
     }
 
     fun addUrl(url: String, title: String = "") = scope.launch(Dispatchers.IO) {
-        app.store.addUrl(url, title.ifBlank { url })
-        refreshFromStore()
+        try {
+            app.store.addUrl(url, title.ifBlank { url }).getOrThrow()
+            refreshFromStore()
+        } catch (t: Throwable) {
+            error.value = "Couldn't fetch URL: ${t.message}"
+        }
     }
 
     fun removeDoc(id: String) = scope.launch {
@@ -202,13 +210,16 @@ class UiController(
 
     fun testConnection() = scope.launch(Dispatchers.IO) {
         error.value = null
+        info.value = null
         try {
             val key = apiKey.value
             val m = model.value.ifBlank { LearnAnywhereApp.DEFAULT_MODEL }
             if (key.isBlank()) { error.value = "Paste a free API key first (aistudio.google.com)."; return@launch }
+            info.value = "Testing…"
             com.learnanywhere.agent.Gemini({ key }, { m }).ping()
-            // Success
+            info.value = "Connected ✔ ($m)"
         } catch (t: Throwable) {
+            info.value = null
             error.value = t.message ?: t.toString()
         }
     }

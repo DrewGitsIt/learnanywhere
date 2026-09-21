@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares LearnAnywhere to Android Auto as a media app. Referenced from the
+     com.google.android.gms.car.application meta-data in AndroidManifest.xml.
+     Without this, Android Auto never lists the app at all. -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

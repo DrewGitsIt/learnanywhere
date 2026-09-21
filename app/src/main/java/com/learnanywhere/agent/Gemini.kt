@@ -108,9 +108,11 @@ class Gemini(
     /** Very-small JSON field extractor — just enough for this response shape. */
     private fun extractFirstJsonString(json: String, key: String): String? {
         // Find the first occurrence of `"key":[{... "text":"..." ...}]`.
-        val idx = json.indexOf("\"$key\"") ?: return null
+        val idx = json.indexOf("\"$key\"")
+        if (idx < 0) return null
         val after = json.substring(idx + key.length + 3)
-        val tStart = after.indexOf("\"text\":\"") ?: return null
+        val tStart = after.indexOf("\"text\":\"")
+        if (tStart < 0) return null
         val s = tStart + 8
         val sb = StringBuilder()
         var i = s
@@ -147,13 +149,14 @@ class GeminiError(val code: Int, override val message: String) : Exception("Gemi
 
 private fun summarizeError(body: String, fallback: String): String {
     // Look for a `"message":"..."` inside a nested `"error"` object.
-    val m = Regex("\"status\":\"([A-Z_]+)\"").find(body)
+    val status = Regex("\"status\":\"([A-Z_]+)\"").find(body)?.groupValues?.get(1)
     val code = Regex("\"code\":(\\d+)").find(body)?.groupValues?.get(1)
     val msg = Regex("\"message\":\"([^\"]+)\"").find(body)?.groupValues?.get(1)
-    return buildString {
-        append(code ?: "-")
-        m?.groupValues?.get(1)?.let { append(" ") ; append(it) }
-        msg?.let { append(": "); append(it) }
-        if (isEmpty()) append(fallback)
+    if (code == null && status == null && msg == null) {
+        // Not the standard error envelope — surface a snippet of whatever the
+        // server actually sent, so failures are diagnosable from the UI.
+        val snippet = body.trim().take(200)
+        return if (snippet.isEmpty()) fallback else "$fallback: $snippet"
     }
+    return listOfNotNull(code, status, msg).joinToString(" ")
 }
