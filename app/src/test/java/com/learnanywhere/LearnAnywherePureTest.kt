@@ -96,7 +96,8 @@ class LearnAnywherePureTest {
         )
         assertTrue(body.contains("{\"google_search\":{}}"), "google_search missing from combo")
         assertTrue(body.contains("\"functionDeclarations\":[{\"name\":\"download_document\""), "declarations missing")
-        assertTrue(body.contains("\"toolConfig\":{\"includeServerSideToolInvocations\":true}"), "toolConfig missing")
+        assertTrue(body.contains("\"toolConfig\":{\"includeServerSideToolInvocations\":true," +
+                "\"functionCallingConfig\":{\"mode\":\"VALIDATED\"}}"), "toolConfig missing")
         assertTrue(body.contains("\"functionResponse\":{\"id\":\"c1\""), "raw part not passed through verbatim")
         assertEquals(body.count { it == '{' }, body.count { it == '}' }, "unbalanced braces")
 

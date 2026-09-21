@@ -83,7 +83,7 @@ class Gemini(
 
     // ------------------------------------------------------------------
 
-    fun generateText(
+    suspend fun generateText(
         contents: List<Message>,
         systemInstruction: String? = null,
         temperature: Float = 1.0f,
@@ -139,12 +139,12 @@ class Gemini(
                 val backoff = 1000L shl (attempt - 1)   // 1s, 2s, 4s…
                 val delay = maxOf(retryDelayMs(respBody) ?: 0L, backoff)
                     .coerceAtMost(30_000L) + (0..250).random()
-                Thread.sleep(delay)
+                kotlinx.coroutines.delay(delay)
             }
         }
     }
 
-    fun ping(): Response =
+    suspend fun ping(): Response =
         generateText(listOf(Message("user", Part(text = "Reply with the single word OK.").let { listOf(it) })),
             maxTokens = 256)
 
@@ -155,9 +155,9 @@ class Gemini(
 
     /**
      * Upload bytes via the resumable protocol (start → upload+finalize),
-     * then wait for the file to become ACTIVE. Blocking; call on IO.
+     * then wait for the file to become ACTIVE. Call on IO.
      */
-    fun uploadFile(bytes: ByteArray, mime: String, displayName: String): UploadedFile {
+    suspend fun uploadFile(bytes: ByteArray, mime: String, displayName: String): UploadedFile {
         val key = apiKey().ifBlank { throw IllegalStateException("No API key") }
         val meta = "{\"file\":{\"display_name\":\"" +
                 GeminiBodyBuilder.escape(displayName) + "\"}}"
@@ -192,7 +192,7 @@ class Gemini(
         // PDFs usually go ACTIVE immediately; poll briefly if still processing.
         var polls = 0
         while (f.state == "PROCESSING" && polls < 15) {
-            Thread.sleep(1000)
+            kotlinx.coroutines.delay(1000)
             polls++
             val get = Request.Builder()
                 .url("https://generativelanguage.googleapis.com/v1beta/${f.name}")
@@ -231,7 +231,7 @@ class Gemini(
      * starts; a mid-stream drop throws GeminiError(0, …) — callers fall back
      * to the non-streamed path.
      */
-    fun generateTextStreamed(
+    suspend fun generateTextStreamed(
         contents: List<Message>,
         systemInstruction: String? = null,
         temperature: Float = 1.0f,
@@ -282,7 +282,7 @@ class Gemini(
                     throw GeminiError(resp.code, msg)
                 }
                 val backoff = 1000L shl (attempt - 1)
-                Thread.sleep(maxOf(retryDelayMs(b) ?: 0L, backoff)
+                kotlinx.coroutines.delay(maxOf(retryDelayMs(b) ?: 0L, backoff)
                     .coerceAtMost(30_000L) + (0..250).random())
                 continue
             }
@@ -319,8 +319,12 @@ class Gemini(
             if (sb.isBlank() && fcalls.isEmpty() && finishReason != null) {
                 throw GeminiError(200, "empty reply (finishReason=$finishReason)")
             }
+            // Streaming yields one rawPart per SSE chunk — a part list the
+            // model never produced. Coalesce text fragments back into the
+            // aggregate part shape so the tool loop's verbatim echo really
+            // is verbatim (Gemini 3 contract).
             return Response(sb.toString(), promptTokens, completionTokens,
-                sources.toList(), fcalls, rawParts)
+                sources.toList(), fcalls, com.learnanywhere.core.ToolWire.coalesceTextParts(rawParts))
         }
     }
 

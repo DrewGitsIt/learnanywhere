@@ -36,11 +36,21 @@ object Http {
      * Fetch raw bytes + Content-Type (for the download_document tool).
      * Capped at [maxBytes] so a bad link can't fill memory.
      */
-    fun fetchBytes(url: String, maxBytes: Long = 30L * 1024 * 1024): Pair<ByteArray, String?> {
+    fun fetchBytes(
+        url: String,
+        maxBytes: Long = 30L * 1024 * 1024,
+        /**
+         * Called with the FINAL URL (after redirects) before the body is
+         * read — throw to reject. OkHttp follows redirects transparently,
+         * so a vetted https URL can otherwise land anywhere.
+         */
+        onFinalUrl: ((String) -> Unit)? = null
+    ): Pair<ByteArray, String?> {
         val req = Request.Builder().url(url).get()
             .header("User-Agent", "LearnAnywhere/1.0 (educational reader)")
             .build()
         client.newCall(req).execute().use { resp ->
+            onFinalUrl?.invoke(resp.request.url.toString())
             if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
             val body = resp.body ?: throw java.io.IOException("empty body")
             val len = body.contentLength()

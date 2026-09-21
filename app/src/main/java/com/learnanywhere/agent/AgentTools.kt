@@ -60,6 +60,10 @@ class AgentTools(
                 }
                 else -> error("unknown tool: $name")
             }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // A cancelled turn must stop the loop, not feed the model a
+            // "{error: cancelled}" it would spend more quota answering.
+            throw c
         } catch (t: Throwable) {
             org.json.JSONObject().put("error", t.message ?: t.toString()).toString()
         }
@@ -81,10 +85,12 @@ class AgentTools(
     }
 
     private suspend fun downloadDocument(url: String, title: String): String {
-        require(url.startsWith("https://") || url.startsWith("http://")) {
-            "url must be an absolute http(s) URL"
-        }
-        val (bytes, contentType) = Http.fetchBytes(url)
+        // The URL comes from the MODEL (possibly echoing third-party search
+        // snippets — indirect prompt injection is live here), and whatever
+        // it fetches is grounded into every later request. Validate hard:
+        // https only, no private/loopback hosts, re-checked after redirects.
+        validateFetchUrl(url)
+        val (bytes, contentType) = Http.fetchBytes(url, onFinalUrl = { validateFetchUrl(it) })
         val isPdf = (contentType?.contains("pdf", ignoreCase = true) == true) ||
                 (bytes.size >= 4 && bytes[0] == '%'.code.toByte() && bytes[1] == 'P'.code.toByte()
                         && bytes[2] == 'D'.code.toByte() && bytes[3] == 'F'.code.toByte())
@@ -98,7 +104,14 @@ class AgentTools(
                 .put("has_text_for_audio", doc.text.isNotBlank())
                 .toString()
         } else {
-            val text = UrlText.stripHtml(String(bytes, Charsets.UTF_8))
+            // Only store what is actually text: a ZIP/MP4 would otherwise
+            // become megabytes of mojibake ballast re-sent on every turn.
+            val ct = contentType?.substringBefore(';')?.trim()?.lowercase()
+            require(ct == null || ct.startsWith("text/") ||
+                    ct == "application/xhtml+xml" || ct == "application/json") {
+                "unsupported content type at that URL: $ct (only PDF and text pages can be added)"
+            }
+            val text = UrlText.stripHtml(String(bytes, Charsets.UTF_8)).take(MAX_STORED_TEXT_CHARS)
             require(text.isNotBlank()) { "no readable text at that URL" }
             val doc = store.addText(title, text, provenance = url)
             org.json.JSONObject()
@@ -110,7 +123,20 @@ class AgentTools(
         }
     }
 
+    private fun validateFetchUrl(url: String) {
+        val u = try { java.net.URI(url) } catch (t: Throwable) {
+            throw IllegalArgumentException("not a valid URL")
+        }
+        require(u.scheme?.lowercase() == "https") { "only https URLs can be fetched" }
+        val host = u.host ?: throw IllegalArgumentException("URL has no host")
+        require(!com.learnanywhere.core.ToolWire.isPrivateHost(host)) {
+            "that host is not a public document server"
+        }
+    }
+
     companion object {
+        private const val MAX_STORED_TEXT_CHARS = 500_000
+
         private val SEARCH_PAPERS_DECL = """
       {"name":"search_papers",
        "description":"Search for academic papers by title, topic, or author (arXiv + Semantic Scholar, no key needed). Results include pdf_url when a free PDF exists — pass that to download_document to add the paper to the library. Use when the user wants to find, look up, or fetch a paper; do not use for general facts or news (use search_web) or for papers already in the library (check list_library).",

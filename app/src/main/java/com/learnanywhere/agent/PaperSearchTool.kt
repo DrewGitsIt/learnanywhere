@@ -44,9 +44,16 @@ class PaperSearchTool(private val client: OkHttpClient = defaultClient()) {
         if (q.isBlank()) return """{"error":"query must not be empty"}"""
         val max = maxResults.coerceIn(1, 10)
 
+        // Not runCatching: it would swallow CancellationException and keep
+        // searching for a turn nobody is waiting on.
+        suspend fun attempt(block: () -> List<Paper>): Result<List<Paper>> =
+            try { Result.success(block()) }
+            catch (c: kotlinx.coroutines.CancellationException) { throw c }
+            catch (t: Throwable) { Result.failure(t) }
+
         val (arxiv, s2) = coroutineScope {
-            val a = async(Dispatchers.IO) { runCatching { fetchArxiv(q) } }
-            val b = async(Dispatchers.IO) { runCatching { fetchS2(q) } }
+            val a = async(Dispatchers.IO) { attempt { fetchArxiv(q) } }
+            val b = async(Dispatchers.IO) { attempt { fetchS2(q) } }
             a.await() to b.await()
         }
 

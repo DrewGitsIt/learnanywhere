@@ -309,30 +309,72 @@ class UiController(
     // ------------------------------------------------------------------
     // Agent
 
+    /** In-flight ask; a new utterance (barge-in) cancels and replaces it. */
+    private var askJob: kotlinx.coroutines.Job? = null
+    private var askGen = 0
+
+    /** Hard wall-clock ceiling for one turn (model rounds + tools + retries). */
+    private val TURN_TIMEOUT_MS = 180_000L
+
     fun ask(q: String) {
         if (q.isBlank()) return
-        scope.launch {
+        val gen = ++askGen
+        askJob?.cancel()
+        askJob = scope.launch {
             busy.value = true
             error.value = null
             question.value = q
             thread.value = thread.value + ChatTurn("user", q)
+            val speak = speakReplies.value
             try {
+                kotlinx.coroutines.withTimeout(TURN_TIMEOUT_MS) {
                 // Voice loop v2: stream the reply — extract the answer field
                 // from the structured JSON as it arrives, chunk into
                 // sentences, and start speaking before the model finishes.
-                val extractor = com.learnanywhere.core.StreamingAnswerExtractor()
-                val chunker = com.learnanywhere.core.SentenceChunker()
+                // The extractor is a ONE-SHOT machine, so each tool-loop
+                // round gets a fresh one (onRoundStart) — reusing it either
+                // swallowed the final answer or spoke raw JSON.
+                var extractor = com.learnanywhere.core.StreamingAnswerExtractor()
+                var chunker = com.learnanywhere.core.SentenceChunker()
                 var spoke = false
-                val speak = speakReplies.value
+                var cueSpoken = false
+                val answerAcc = StringBuilder()   // current round's spoken text
                 val onDelta: ((String) -> Unit)? = if (speak) { d ->
                     val t = extractor.feed(d)
                     if (t.isNotEmpty()) {
+                        answerAcc.append(t)
                         streamingAnswer.value = (streamingAnswer.value ?: "") + t
                         chunker.feed(t).forEach { s ->
                             player.enqueueSay(s, flush = !spoke); spoke = true
                         }
                     }
                 } else null
+                val onRoundStart = {
+                    // Speak any tail of the round that just ended (model
+                    // narration like "Let me look that up."), then reset.
+                    chunker.flush()?.let {
+                        if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true }
+                    }
+                    extractor = com.learnanywhere.core.StreamingAnswerExtractor()
+                    chunker = com.learnanywhere.core.SentenceChunker()
+                    answerAcc.setLength(0)
+                    streamingAnswer.value = null
+                }
+                val onToolCall: (String) -> Unit = { name ->
+                    val cue = when (name) {
+                        "search_papers" -> "Searching for papers…"
+                        "search_web" -> "Searching the web…"
+                        "download_document" -> "Downloading the document…"
+                        "list_library" -> "Checking your library…"
+                        else -> "Working…"
+                    }
+                    streamingAnswer.value = cue
+                    // One spoken cue per turn so tool rounds aren't dead air.
+                    if (speak && !spoke && !cueSpoken) {
+                        cueSpoken = true
+                        player.enqueueSay(cue, flush = false)
+                    }
+                }
 
                 // Read-with-me: give the agent the reading cursor as context,
                 // and arrange to resume reading once the answer is spoken.
@@ -348,8 +390,16 @@ class UiController(
                     else "Ignore attached documents; answer from general knowledge and tag (general).",
                     readingExtra
                 ).joinToString("\n\n").ifBlank { null }
-                val reply = app.agent.ask(q, systemExtra = extras, onAnswerDelta = onDelta)
+                val reply = app.agent.ask(q, systemExtra = extras, onAnswerDelta = onDelta,
+                    onRoundStart = onRoundStart, onToolCall = onToolCall)
                 chunker.flush()?.let { if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true } }
+                // Stream dropped mid-answer and the non-streamed retry
+                // finished it: speak the part that never arrived as deltas.
+                if (speak && spoke && answerAcc.isNotEmpty() &&
+                    reply.text.length > answerAcc.length &&
+                    reply.text.startsWith(answerAcc.toString())) {
+                    player.enqueueSay(reply.text.substring(answerAcc.length).trim(), flush = false)
+                }
                 this@UiController.reply.value = reply
                 val citedTitle = reply.citedDocId?.let { id ->
                     app.store.byId(id)?.title
@@ -362,11 +412,33 @@ class UiController(
                 if (speak && !spoke && reply.text.isNotBlank()) {
                     player.sayOnce(reply.text)
                 }
+                }
+            } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
+                error.value = "Turn timed out after ${TURN_TIMEOUT_MS / 1000}s"
+                if (speak) player.sayOnce("Sorry, that took too long. Please try again.")
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c   // superseded by a newer utterance — say nothing
             } catch (t: Throwable) {
+                // Errors are surfaced on the error line, NOT written into the
+                // conversation as a model turn, and spoken as one short human
+                // sentence — never a raw HTTP dump (audit finding).
                 error.value = t.message ?: t.toString()
+                if (speak) {
+                    val phrase = when {
+                        t.message?.contains("daily free-tier quota") == true ->
+                            "The free A I quota is used up for today."
+                        else -> "Sorry, I couldn't reach the model."
+                    }
+                    player.sayOnce(phrase)
+                }
             } finally {
-                busy.value = false
-                streamingAnswer.value = null
+                // Only the CURRENT turn may clear shared state — a cancelled
+                // predecessor running its finally must not blank the UI of
+                // the ask that replaced it.
+                if (gen == askGen) {
+                    busy.value = false
+                    streamingAnswer.value = null
+                }
             }
         }
     }

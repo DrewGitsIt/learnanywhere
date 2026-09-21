@@ -2,8 +2,12 @@ package com.learnanywhere.agent
 
 import android.content.Context
 import android.net.Uri
+import com.learnanywhere.core.ToolWire
 import com.learnanywhere.data.Document
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -42,6 +46,13 @@ class LearnAnywhereAgent(
     private val history = ArrayDeque<Gemini.Message>()
 
     /**
+     * Serializes turns: barge-in cancels the old ask, but cancellation is
+     * cooperative — without this, a dying turn could interleave [history]
+     * writes with its replacement.
+     */
+    private val askMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
      * Free-tier keys can have ZERO Google Search grounding quota: any request
      * with the google_search tool attached 429s instantly (bare body, no
      * RetryInfo) while identical requests without it succeed (observed
@@ -71,13 +82,22 @@ class LearnAnywhereAgent(
         question: String,
         systemExtra: String? = null,
         /** Voice loop v2: raw text deltas as the reply streams (SSE). */
-        onAnswerDelta: ((String) -> Unit)? = null
+        onAnswerDelta: ((String) -> Unit)? = null,
+        /**
+         * Fires before each additional model round of the tool loop so the
+         * UI can reset its per-round streaming state (the answer extractor
+         * is a one-shot machine; reusing it across rounds swallows the
+         * final answer or speaks raw JSON).
+         */
+        onRoundStart: (() -> Unit)? = null,
+        /** Fires as each tool starts executing — feed for "Searching…" cues. */
+        onToolCall: ((String) -> Unit)? = null
     ): AgentReply =
-        withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) { askMutex.withLock {
             val client = Gemini(api, model)
             val docsHere = docs()
 
-            fun buildGrounding(inlineOnly: Boolean): Pair<List<Gemini.Message>, Boolean> {
+            suspend fun buildGrounding(inlineOnly: Boolean): Pair<List<Gemini.Message>, Boolean> {
                 var usedFileUris = false
                 val msgs = buildList {
                     docsHere.forEach { d ->
@@ -102,9 +122,12 @@ class LearnAnywhereAgent(
 
             try {
                 var useSchema = true
-                fun call(contents: List<Gemini.Message>): Gemini.Response {
+                // Snapshot once per ask: the Tavily key / web-search toggle
+                // can change mid-loop, and rounds 2..N must declare the same
+                // tool set the echoed functionCalls came from.
+                val decls = tools?.declarationsJson
+                suspend fun call(contents: List<Gemini.Message>): Gemini.Response {
                     val schema = if (useSchema) RESPONSE_SCHEMA else null
-                    val decls = tools?.declarationsJson
                     return if (onAnswerDelta != null) {
                         try {
                             client.generateTextStreamed(
@@ -135,7 +158,7 @@ class LearnAnywhereAgent(
                 // is almost always the search-grounding quota, not the model's
                 // (plain requests keep working). Degrade and go on; if the
                 // model quota really is gone the retry 429s too and surfaces.
-                fun callDroppingSearchOn429(contents: List<Gemini.Message>): Gemini.Response =
+                suspend fun callDroppingSearchOn429(contents: List<Gemini.Message>): Gemini.Response =
                     try {
                         call(contents)
                     } catch (e: GeminiError) {
@@ -180,25 +203,54 @@ class LearnAnywhereAgent(
                 var iterations = 0
                 while (reply.functionCalls.isNotEmpty() && iterations < MAX_TOOL_ITERATIONS) {
                     iterations++
+                    val budgetExhausted = iterations == MAX_TOOL_ITERATIONS
                     toolTurns.add(Gemini.Message("model",
                         reply.rawParts.map { Gemini.Part(rawJson = it) }))
-                    val responses = reply.functionCalls.map { fc ->
-                        val result = tools?.execute(fc.name, fc.argsJson)
-                            ?: "{\"error\":\"no tools available\"}"
-                        val idField = fc.id?.let { "\"id\":\"$it\"," } ?: ""
-                        Gemini.Part(rawJson =
-                            "{\"functionResponse\":{" + idField +
-                                    "\"name\":\"${fc.name}\",\"response\":" + result + "}}")
+                    // Execute parallel calls CONCURRENTLY (the model batches
+                    // e.g. search_papers + list_library in one reply; serial
+                    // execution is dead air the user hears).
+                    val responses = coroutineScope {
+                        reply.functionCalls.map { fc ->
+                            async {
+                                onToolCall?.invoke(fc.name)
+                                val result =
+                                    if (budgetExhausted) "{\"error\":\"tool budget exhausted\"}"
+                                    else tools?.execute(fc.name, fc.argsJson)
+                                        ?: "{\"error\":\"no tools available\"}"
+                                Gemini.Part(rawJson =
+                                    ToolWire.functionResponsePart(fc.id, fc.name, result))
+                            }
+                        }.map { it.await() }
                     }
-                    toolTurns.add(Gemini.Message("user", responses))
+                    val parts =
+                        if (!budgetExhausted) responses
+                        // Last round: tell the model the budget is gone so it
+                        // answers from what it has instead of looping. The
+                        // pending calls still get (error) responses — leaving
+                        // them unanswered is a contract violation.
+                        else responses + Gemini.Part(text = "Tool budget exhausted — answer " +
+                                "the user now from what you already have; do not call more tools.")
+                    toolTurns.add(Gemini.Message("user", parts))
+                    onRoundStart?.invoke()
                     reply = callDroppingSearchOn429(base + toolTurns)
+                }
+                if (reply.functionCalls.isNotEmpty()) {
+                    // Even the forced-answer round tried to call tools: fail
+                    // loudly rather than return an empty answer after side
+                    // effects (downloads) already landed.
+                    throw GeminiError(200,
+                        "the model kept requesting tools after $MAX_TOOL_ITERATIONS rounds")
                 }
 
                 val parsed = ReplyJson.parse(reply.text)
                 val answer = parsed?.answer ?: reply.text
-                history.addLast(userMsg)
-                history.addLast(Gemini.Message("model", listOf(Gemini.Part(text = answer))))
-                while (history.size > MAX_HISTORY_TURNS * 2) history.removeFirst()
+                if (answer.isNotBlank()) {
+                    // Never write a blank model turn — it would be re-sent as
+                    // poisoned history on every later ask this session.
+                    history.addLast(userMsg)
+                    history.addLast(Gemini.Message("model", listOf(Gemini.Part(text = answer))))
+                    while (history.size > MAX_HISTORY_TURNS * 2) history.removeFirst()
+                }
 
                 val citedDoc = parsed?.citedDocument?.let { title ->
                     docsHere.firstOrNull { it.title.equals(title, ignoreCase = true) }
@@ -213,10 +265,14 @@ class LearnAnywhereAgent(
                 val usage = if (reply.promptTokens != null || reply.completionTokens != null)
                     "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" else null
                 AgentReply(answer, citedDoc, fig, usage, reply.sources)
-            } catch (e: Exception) {
-                AgentReply("Connection problem: " + (e.message ?: "unknown"), null, null, null)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             }
-        }
+            // Everything else propagates: converting failures into a normal-
+            // looking AgentReply made TTS read HTTP dumps aloud and wrote
+            // them into the conversation DB as model turns (audit finding).
+            // UiController owns turning errors into a short spoken sentence.
+        } }
 
     /** On-demand caption for a rendered PDF page. */
     suspend fun captionFigure(doc: Document, figure: com.learnanywhere.data.Figure): String =
@@ -239,7 +295,7 @@ class LearnAnywhereAgent(
     // Grounding helpers
 
     /** Files-API grounding: cached URI if fresh, else upload; inline on failure. */
-    private fun pdfGroundingPart(client: Gemini, d: Document): Gemini.Message? {
+    private suspend fun pdfGroundingPart(client: Gemini, d: Document): Gemini.Message? {
         val now = System.currentTimeMillis()
         filePrefs.getString(d.id, null)?.split("|")?.let { cached ->
             if (cached.size == 2 && (cached[1].toLongOrNull() ?: 0L) > now) {

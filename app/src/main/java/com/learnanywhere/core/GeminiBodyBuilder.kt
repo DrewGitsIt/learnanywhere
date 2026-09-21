@@ -77,9 +77,11 @@ object GeminiBodyBuilder {
             functionDeclarationsJson?.let { tools.add("{\"functionDeclarations\":$it}") }
             sb.append(",\"tools\":[").append(tools.joinToString(",")).append("]")
             if (enableGoogleSearch && functionDeclarationsJson != null) {
-                // Gemini 3 combo requirement; mode defaults to VALIDATED
-                // (AUTO is unsupported when built-in + custom tools combine).
-                sb.append(",\"toolConfig\":{\"includeServerSideToolInvocations\":true}")
+                // Gemini 3 combo requirement (DESIGN §3.7): VALIDATED is the
+                // only supported mode when built-in + custom tools combine —
+                // send it explicitly rather than trusting the default.
+                sb.append(",\"toolConfig\":{\"includeServerSideToolInvocations\":true,")
+                    .append("\"functionCallingConfig\":{\"mode\":\"VALIDATED\"}}")
             }
         }
         sb.append("}")

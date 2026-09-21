@@ -53,6 +53,8 @@ class WebSearchTool(private val key: () -> String) {
                         TavilySearch.parseResponse(respBody)
                     }
                 }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
             } catch (e: IOException) {
                 """{"error":"web search failed: ${escape(e.message ?: "network error")}"}"""
             } catch (t: Throwable) {
