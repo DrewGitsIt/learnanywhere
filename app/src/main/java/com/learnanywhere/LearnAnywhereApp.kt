@@ -175,6 +175,7 @@ class LearnAnywhereApp : Application() {
         const val KEY_WEB_SEARCH = "web_search"
         const val KEY_SPEAK_REPLIES = "speak_replies"
         const val KEY_BARGE_IN = "barge_in"
+        const val KEY_NEURAL_TTS = "neural_tts"
         const val DEFAULT_MODEL = com.learnanywhere.agent.Gemini.DEFAULT_MODEL
 
         @Volatile

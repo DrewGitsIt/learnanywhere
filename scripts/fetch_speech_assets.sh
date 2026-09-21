@@ -49,3 +49,15 @@ if [ ! -f app/src/main/assets/asr/silero_vad.onnx ]; then
   curl -fL -o app/src/main/assets/asr/silero_vad.onnx \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 fi
+
+PIPER="vits-piper-en_US-amy-medium"
+if [ ! -f app/src/main/assets/tts/en_US-amy-medium.onnx ]; then
+  echo "Fetching Piper voice (~65 MB)…"
+  mkdir -p app/src/main/assets/tts
+  curl -fL -o "$tmp/piper.tar.bz2" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${PIPER}.tar.bz2"
+  tar xjf "$tmp/piper.tar.bz2" -C "$tmp"
+  cp "$tmp/$PIPER/en_US-amy-medium.onnx" app/src/main/assets/tts/
+  cp "$tmp/$PIPER/tokens.txt"            app/src/main/assets/tts/
+  cp -R "$tmp/$PIPER/espeak-ng-data"     app/src/main/assets/tts/espeak-ng-data
+fi

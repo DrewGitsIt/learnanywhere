@@ -931,6 +931,11 @@ private fun SettingsSheet(ctl: UiController, onClose: () -> Unit) {
                 checked = ctl.speakReplies.value,
                 onChange = { ctl.toggleSpeakReplies(it) })
             SettingSwitch(
+                title = "Neural voice (Piper)",
+                subtitle = "Natural on-device voice; first use loads the model (~3 s)",
+                checked = ctl.neuralVoice.value,
+                onChange = { ctl.toggleNeuralVoice(it) })
+            SettingSwitch(
                 title = "Voice interrupt",
                 subtitle = "While it's talking, just speak to interrupt (on-device VAD)",
                 checked = ctl.bargeIn.value,

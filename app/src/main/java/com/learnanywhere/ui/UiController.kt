@@ -69,6 +69,8 @@ class UiController(
     val speakReplies = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_SPEAK_REPLIES, true))
     /** Voice loop v2: interrupt playback by just speaking (Silero VAD watches the mic). */
     val bargeIn = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_BARGE_IN, true))
+    /** Piper neural voice instead of the system TTS (falls back automatically on failure). */
+    val neuralVoice = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_NEURAL_TTS, true))
     /** Live text of the reply currently streaming in (null when idle). */
     val streamingAnswer = mutableStateOf<String?>(null)
 
@@ -102,6 +104,8 @@ class UiController(
     val whisperBusy = mutableStateOf(false)
 
     init {
+        player.attachNeural(com.learnanywhere.audio.NeuralTts(app.applicationContext))
+        player.neuralEnabled = { neuralVoice.value }
         scope.launch {
             player.stateFlow.collect { s ->
                 isPlaying.value = s.isPlaying
@@ -181,6 +185,12 @@ class UiController(
         bargeIn.value = v
         app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_BARGE_IN, v).apply()
         updateBargeGuard()
+    }
+
+    fun toggleNeuralVoice(v: Boolean) {
+        neuralVoice.value = v
+        app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_NEURAL_TTS, v).apply()
+        player.pause()   // takes effect on the next utterance
     }
 
     // ------------------------------------------------------------------

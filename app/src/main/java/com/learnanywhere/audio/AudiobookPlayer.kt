@@ -45,27 +45,69 @@ class AudiobookPlayer(
     /** sayOnce()/enqueueSay() texts that arrived before the engine was ready. */
     private val pendingSay = ArrayList<String>()
 
-    private val utteranceListener = object : UtteranceProgressListener() {
-        override fun onStart(utteranceId: String?) {
-            val i = chunkIds.indexOf(utteranceId)
-            if (i >= 0) chunkIdx = i
-            publish { it.copy(isPlaying = true, activeUtterance = utteranceId) }
-        }
-        override fun onDone(utteranceId: String?) {
-            val finalId = finalUtteranceOfDoc
-            if (finalId != null) {
-                if (utteranceId == finalId) scope.launch { advanceDoc() }
-                // else: an intermediate chunk finished; the next queued chunk
-                // fires onStart on its own.
-            } else if (utteranceId == state.value.activeUtterance) {
-                // sayOnce finished.
-                publish { it.copy(isPlaying = false, activeUtterance = null) }
+    // ---- neural voice (Piper) routing ----
+    private var neural: NeuralTts? = null
+    var neuralEnabled: () -> Boolean = { false }
+    @Volatile private var neuralFailed = false
+
+    /** Attach the Piper engine; its callbacks reuse the same utterance flow. */
+    fun attachNeural(n: NeuralTts) {
+        neural = n
+        n.onStart = { id -> scope.launch { handleUttStart(id) } }
+        n.onDone = { id -> scope.launch { handleUttDone(id) } }
+        n.onFailed = { id, text, err ->
+            scope.launch {
+                // Permanent fallback to the system voice for this session.
+                neuralFailed = true
+                publish { it.copy(error = err) }
+                if (text.isNotBlank()) engineSpeak(text, id, flush = false)
             }
         }
-        override fun onError(utteranceId: String?) {
-            publish { it.copy(isPlaying = false, activeUtterance = null, error = "TTS error") }
+    }
+
+    private fun handleUttStart(utteranceId: String?) {
+        val i = chunkIds.indexOf(utteranceId)
+        if (i >= 0) chunkIdx = i
+        publish { it.copy(isPlaying = true, activeUtterance = utteranceId) }
+    }
+
+    private fun handleUttDone(utteranceId: String?) {
+        val finalId = finalUtteranceOfDoc
+        if (finalId != null) {
+            if (utteranceId == finalId) scope.launch { advanceDoc() }
+            // else: an intermediate chunk finished; the next queued chunk
+            // fires onStart on its own.
+        } else if (utteranceId == state.value.activeUtterance) {
+            // sayOnce finished.
+            publish { it.copy(isPlaying = false, activeUtterance = null) }
         }
-        override fun onError(utteranceId: String?, errorCode: Int) = onError(utteranceId)
+    }
+
+    private fun handleUttError() {
+        publish { it.copy(isPlaying = false, activeUtterance = null, error = "TTS error") }
+    }
+
+    /** Route one utterance to whichever engine is active. */
+    private fun engineSpeak(text: String, id: String, flush: Boolean) {
+        val n = neural
+        if (n != null && !neuralFailed && neuralEnabled()) {
+            n.setRate(state.value.rate)
+            n.enqueue(id, text, flush)
+        } else {
+            try {
+                tts?.speak(text,
+                    if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
+            } catch (t: Throwable) {
+                publish { it.copy(error = t.message) }
+            }
+        }
+    }
+
+    private val utteranceListener = object : UtteranceProgressListener() {
+        override fun onStart(utteranceId: String?) = handleUttStart(utteranceId)
+        override fun onDone(utteranceId: String?) = handleUttDone(utteranceId)
+        override fun onError(utteranceId: String?) = handleUttError()
+        override fun onError(utteranceId: String?, errorCode: Int) = handleUttError()
     }
 
     /** Public surface driven by both phone UI and car UI. */
@@ -88,6 +130,7 @@ class AudiobookPlayer(
         // tts.stop() drops the queued chunks; resume() re-enqueues from the
         // chunk that was playing (chunkIdx), so position survives a pause.
         tts?.stop()
+        neural?.stopCurrent()
         publish { it.copy(isPlaying = false) }
     }
 
@@ -99,6 +142,7 @@ class AudiobookPlayer(
 
     fun stop() {
         tts?.stop()
+        neural?.stopCurrent()
         clearChunks()
         publish { it.copy(isPlaying = false, activeUtterance = null, queue = emptyList(), cursor = 0) }
     }
@@ -120,6 +164,7 @@ class AudiobookPlayer(
     fun setRate(r: Float) {
         publish { it.copy(rate = r) }
         tts?.setSpeechRate(r)
+        neural?.setRate(r)
     }
 
     /**
@@ -152,13 +197,7 @@ class AudiobookPlayer(
             clearChunks()   // sayOnce mode: no doc-advance on done
             val id = UUID.randomUUID().toString()
             publish { it.copy(activeUtterance = id, activeTextPreview = truncate(text, 96)) }
-            try {
-                tts?.speak(text,
-                    if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                    null, id)
-            } catch (t: Throwable) {
-                publish { it.copy(error = t.message) }
-            }
+            engineSpeak(text, id, flush)
         }
     }
 
@@ -179,7 +218,7 @@ class AudiobookPlayer(
                     pendingSay.clear()
                     queued.forEachIndexed { i, s ->
                         if (i == 0) speakSingle(s)
-                        else tts?.speak(s, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+                        else engineSpeak(s, UUID.randomUUID().toString(), flush = false)
                     }
                 } else if (state.value.queue.isNotEmpty()) playCurrent()
             }
@@ -220,19 +259,13 @@ class AudiobookPlayer(
     }
 
     private fun speakChunksFrom(start: Int) {
-        val t = tts ?: return
+        if (tts == null && neural == null) return
         if (chunks.isEmpty() || start !in chunks.indices) return
         finalUtteranceOfDoc = chunkIds.last()
         publish { it.copy(activeUtterance = chunkIds[start],
                           activeTextPreview = truncate(chunks[start], 96)) }
-        try {
-            for (i in start until chunks.size) {
-                t.speak(chunks[i],
-                    if (i == start) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                    null, chunkIds[i])
-            }
-        } catch (e: Throwable) {
-            publish { it.copy(error = e.message) }
+        for (i in start until chunks.size) {
+            engineSpeak(chunks[i], chunkIds[i], flush = i == start)
         }
     }
 
@@ -250,15 +283,11 @@ class AudiobookPlayer(
 
     /** Speak one stand-alone utterance (sayOnce mode; no doc-advance on done). */
     private fun speakSingle(text: String) {
-        if (tts == null) return
+        if (tts == null && neural == null) return
         clearChunks()
         val id = UUID.randomUUID().toString()
         publish { it.copy(activeUtterance = id, activeTextPreview = truncate(text, 96)) }
-        try {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
-        } catch (t: Throwable) {
-            publish { it.copy(error = t.message) }
-        }
+        engineSpeak(text, id, flush = true)
     }
 
     private fun clearChunks() {

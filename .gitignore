@@ -12,3 +12,4 @@
 # Large speech binaries — fetched by scripts/fetch_speech_assets.sh
 /app/libs/*.aar
 /app/src/main/assets/asr/
+/app/src/main/assets/tts/
