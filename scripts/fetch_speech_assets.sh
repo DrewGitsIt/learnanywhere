@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 
 SHERPA_VERSION="1.13.8"
 MODEL="sherpa-onnx-streaming-zipformer-en-2023-06-26"
+WHISPER="sherpa-onnx-whisper-tiny.en"
 
 mkdir -p app/libs app/src/main/assets/asr
 tmp=$(mktemp -d)
@@ -28,6 +29,16 @@ if [ ! -f app/src/main/assets/asr/encoder.int8.onnx ]; then
   cp "$tmp/$MODEL/decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx" app/src/main/assets/asr/decoder.int8.onnx
   cp "$tmp/$MODEL/joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"  app/src/main/assets/asr/joiner.int8.onnx
   cp "$tmp/$MODEL/tokens.txt"                                          app/src/main/assets/asr/tokens.txt
+fi
+
+if [ ! -f app/src/main/assets/asr/whisper-encoder.int8.onnx ]; then
+  echo "Fetching whisper tiny.en model (~100 MB)…"
+  curl -fL -o "$tmp/whisper.tar.bz2" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${WHISPER}.tar.bz2"
+  tar xjf "$tmp/whisper.tar.bz2" -C "$tmp"
+  cp "$tmp/$WHISPER/tiny.en-encoder.int8.onnx" app/src/main/assets/asr/whisper-encoder.int8.onnx
+  cp "$tmp/$WHISPER/tiny.en-decoder.int8.onnx" app/src/main/assets/asr/whisper-decoder.int8.onnx
+  cp "$tmp/$WHISPER/tiny.en-tokens.txt"        app/src/main/assets/asr/whisper-tokens.txt
 fi
 
 echo "Speech assets ready:"

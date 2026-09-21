@@ -51,6 +51,10 @@ class UiController(
     val voice = com.learnanywhere.speech.VoiceInput(app.applicationContext)
     val voiceState = mutableStateOf(com.learnanywhere.speech.VoiceInput.State.IDLE)
     val voicePartial = mutableStateOf("")
+    // A/B transcripts of the last utterance (zipformer vs whisper tiny.en)
+    val lastZipformer = mutableStateOf<String?>(null)
+    val whisperText = mutableStateOf<String?>(null)
+    val whisperBusy = mutableStateOf(false)
 
     init {
         scope.launch {
@@ -62,6 +66,9 @@ class UiController(
         scope.launch { voice.state.collect { voiceState.value = it } }
         scope.launch { voice.partial.collect { voicePartial.value = it } }
         scope.launch { voice.error.collect { if (it != null) error.value = it } }
+        scope.launch { voice.lastZipformer.collect { lastZipformer.value = it } }
+        scope.launch { voice.whisperText.collect { whisperText.value = it } }
+        scope.launch { voice.whisperBusy.collect { whisperBusy.value = it } }
     }
 
     /**

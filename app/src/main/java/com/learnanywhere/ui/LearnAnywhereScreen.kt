@@ -211,6 +211,21 @@ private fun AskSection(ctl: UiController) {
                 }
             }
 
+            // ASR A/B: what each model heard for the last utterance.
+            ctl.lastZipformer.value?.let { z ->
+                Column {
+                    Text("Heard (streaming zipformer): $z",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Heard (whisper tiny.en): " + when {
+                        ctl.whisperBusy.value -> "decoding…"
+                        else -> ctl.whisperText.value ?: "—"
+                    },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
             ctl.reply.value?.let { r ->
                 Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.secondaryContainer)) {

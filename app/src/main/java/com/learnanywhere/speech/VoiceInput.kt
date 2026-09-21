@@ -8,6 +8,10 @@ import android.media.MediaRecorder
 import com.k2fsa.sherpa.onnx.EndpointConfig
 import com.k2fsa.sherpa.onnx.EndpointRule
 import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizer
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
@@ -46,7 +50,15 @@ class VoiceInput(
     val partial = MutableStateFlow("")
     val error = MutableStateFlow<String?>(null)
 
+    // A/B comparison (DESIGN.md §3.1): after each utterance, the recorded
+    // audio is re-decoded by Whisper tiny.en so the two transcripts can be
+    // compared. The zipformer text is still what gets asked (it's instant).
+    val lastZipformer = MutableStateFlow<String?>(null)
+    val whisperText = MutableStateFlow<String?>(null)
+    val whisperBusy = MutableStateFlow(false)
+
     private var recognizer: OnlineRecognizer? = null
+    private var whisper: OfflineRecognizer? = null
     private var sessionJob: Job? = null
     @Volatile private var stopRequested = false
 
@@ -123,11 +135,18 @@ class VoiceInput(
                 _state.value = State.LISTENING
 
                 val buf = ShortArray(SAMPLE_RATE / 10) // 100 ms chunks
+                // Whole-utterance copy for the Whisper comparison pass
+                // (capped at Whisper's 30 s window).
+                val recorded = ArrayList<FloatArray>()
+                var recordedSamples = 0
                 var finalText = ""
                 while (!stopRequested) {
                     val n = record.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     val samples = FloatArray(n) { buf[it] / 32768f }
+                    if (recordedSamples < SAMPLE_RATE * 29) {
+                        recorded.add(samples.copyOf()); recordedSamples += n
+                    }
                     stream.acceptWaveform(samples, SAMPLE_RATE)
                     while (rec.isReady(stream)) rec.decode(stream)
                     val text = rec.getResult(stream).text.trim()
@@ -135,10 +154,13 @@ class VoiceInput(
                     if (rec.isEndpoint(stream)) {
                         if (text.isNotBlank()) { finalText = text; break }
                         rec.reset(stream) // silence-only endpoint: keep waiting
+                        recorded.clear(); recordedSamples = 0
                     }
                 }
                 if (finalText.isBlank()) finalText = rec.getResult(stream).text.trim()
                 if (finalText.isNotBlank()) {
+                    lastZipformer.value = finalText
+                    launchWhisperPass(recorded, recordedSamples)
                     withContext(Dispatchers.Main) { onFinal(finalText) }
                 }
             } finally {
@@ -151,6 +173,55 @@ class VoiceInput(
             record?.release()
             _state.value = State.IDLE
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Whisper comparison pass
+
+    private fun launchWhisperPass(chunks: List<FloatArray>, total: Int) {
+        if (total == 0) { whisperText.value = null; return }
+        val samples = FloatArray(total)
+        var off = 0
+        for (c in chunks) { c.copyInto(samples, off); off += c.size }
+        whisperBusy.value = true
+        whisperText.value = null
+        scope.launch(Dispatchers.IO) {
+            try {
+                val w = ensureWhisper()
+                val stream = w.createStream()
+                try {
+                    stream.acceptWaveform(samples, SAMPLE_RATE)
+                    w.decode(stream)
+                    whisperText.value = w.getResult(stream).text.trim()
+                } finally {
+                    stream.release()
+                }
+            } catch (t: Throwable) {
+                whisperText.value = "(whisper failed: ${t.message})"
+            } finally {
+                whisperBusy.value = false
+            }
+        }
+    }
+
+    private fun ensureWhisper(): OfflineRecognizer {
+        whisper?.let { return it }
+        val config = OfflineRecognizerConfig(
+            featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+            modelConfig = OfflineModelConfig(
+                whisper = OfflineWhisperModelConfig(
+                    encoder = "asr/whisper-encoder.int8.onnx",
+                    decoder = "asr/whisper-decoder.int8.onnx",
+                    language = "en",
+                    task = "transcribe",
+                ),
+                tokens = "asr/whisper-tokens.txt",
+                modelType = "whisper",
+                numThreads = 2,
+            ),
+            decodingMethod = "greedy_search",
+        )
+        return OfflineRecognizer(context.assets, config).also { whisper = it }
     }
 
     companion object {
