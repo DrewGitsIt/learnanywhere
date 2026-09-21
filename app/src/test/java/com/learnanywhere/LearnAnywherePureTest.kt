@@ -328,6 +328,23 @@ class LearnAnywherePureTest {
         assertEquals(listOf("It weighs 3.5 kg total."), d.feed(" total. Next"))
     }
 
+    /** Read-with-me: sectionizer respects paragraphs and bounds section size. */
+    @Test
+    fun sectionsSplitRespectsParagraphsAndSize() {
+        val para = "This is a sentence. " // 20 chars
+        val text = para.repeat(20).trim() + "\n\n" + para.repeat(20).trim() +
+                "\n\n" + para.repeat(200).trim()   // last para is huge (~4000)
+        val secs = com.learnanywhere.core.Sections.split(text, target = 500)
+        assertTrue(secs.size >= 5, "expected several sections, got ${secs.size}")
+        assertTrue(secs.all { it.length <= 1100 }, "a section exceeds 2x target: " +
+                secs.maxOf { it.length })
+        // Nothing lost (modulo the paragraph separators we re-add).
+        val joined = secs.joinToString(" ").replace(Regex("\\s+"), " ")
+        assertEquals(text.replace(Regex("\\s+"), " ").length, joined.length)
+        // Sections end at sentence boundaries.
+        assertTrue(secs.all { it.endsWith(".") }, "section not sentence-aligned")
+    }
+
     /** PDF text re-flow: de-hyphenate wraps, join lines, keep paragraphs. */
     @Test
     fun pdfTextNormalizeReflowsForTts() {

@@ -73,6 +73,22 @@ class UiController(
     val streamingAnswer = mutableStateOf<String?>(null)
 
     private val barge = com.learnanywhere.speech.BargeInGuard(app.applicationContext)
+
+    // ---- read-with-me mode (DESIGN roadmap #8) ----
+    data class ReadingState(
+        val docId: String,
+        val docTitle: String,
+        val sections: List<String>,
+        val index: Int
+    )
+
+    /** Non-null while a guided reading session is active. */
+    val reading = mutableStateOf<ReadingState?>(null)
+    /** True while the current section is being read (vs. answering a question). */
+    private var sectionSpeaking = false
+    /** Resume reading automatically once a question's answer finishes. */
+    private var resumeAfterAnswer = false
+    private var wasPlaying = false
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
@@ -92,6 +108,8 @@ class UiController(
                 playback.value = s
                 if (s.error != null) error.value = s.error
                 updateBargeGuard()
+                if (wasPlaying && !s.isPlaying) onSpeechFinished()
+                wasPlaying = s.isPlaying
             }
         }
         scope.launch { app.db.db.conversations().observe().collect { sessions.value = it } }
@@ -113,11 +131,36 @@ class UiController(
             // Opening the mic silences any playing TTS so the recognizer
             // doesn't transcribe our own voice output.
             barge.stop()
+            sectionSpeaking = false   // an interrupted section must not auto-advance
             player.pause()
-            voice.start { text -> ask(text) }
+            voice.start { text -> handleUtterance(text) }
         } else {
             voice.stop()
         }
+    }
+
+    /**
+     * Route a finished utterance: during a reading session a couple of
+     * commands are handled locally (no API round-trip); everything else
+     * goes to the agent.
+     */
+    private fun handleUtterance(text: String) {
+        val r = reading.value
+        if (r != null) {
+            val t = text.trim().lowercase().trimEnd('.', '!', '?')
+            when {
+                Regex("^(continue|resume|keep (going|reading)|go on)( reading)?$").matches(t) -> {
+                    speakSection(r.index); return
+                }
+                Regex("^next( section)?( please)?$").matches(t) -> {
+                    speakSection(r.index + 1); return
+                }
+                Regex("^((please )?stop( reading)?|end (reading|session)|that's enough)$").matches(t) -> {
+                    endReadWithMe(); return
+                }
+            }
+        }
+        ask(text)
     }
 
     /**
@@ -138,6 +181,72 @@ class UiController(
         bargeIn.value = v
         app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_BARGE_IN, v).apply()
         updateBargeGuard()
+    }
+
+    // ------------------------------------------------------------------
+    // Read-with-me
+
+    fun startReadWithMe(docId: String) {
+        val d = app.store.byId(docId) ?: return
+        if (d.text.isBlank()) {
+            error.value = "No readable text in this document (scanned PDF?)."
+            return
+        }
+        val secs = com.learnanywhere.core.Sections.split(d.text)
+        if (secs.isEmpty()) { error.value = "Nothing to read."; return }
+        player.stop()   // clear any audiobook queue
+        reading.value = ReadingState(docId, d.title, secs, 0)
+        resumeAfterAnswer = false
+        speakSection(0)
+    }
+
+    fun nextSection() { reading.value?.let { speakSection(it.index + 1) } }
+    fun prevSection() { reading.value?.let { speakSection(maxOf(0, it.index - 1)) } }
+
+    fun endReadWithMe(announce: Boolean = false) {
+        val wasActive = reading.value != null
+        reading.value = null
+        sectionSpeaking = false
+        resumeAfterAnswer = false
+        if (wasActive) {
+            if (announce) player.sayOnce("That's the end of the document.")
+            else player.pause()
+        }
+    }
+
+    private fun speakSection(i: Int) {
+        val r = reading.value ?: return
+        if (i >= r.sections.size) { endReadWithMe(announce = true); return }
+        reading.value = r.copy(index = i)
+        sectionSpeaking = true
+        player.sayOnce("Section ${i + 1}. " + r.sections[i])
+    }
+
+    /**
+     * Fires on the playing→stopped transition. During a reading session:
+     * a section that finished naturally auto-advances; an answer that
+     * finished resumes the interrupted section. Debounced + re-checked,
+     * because QUEUE_ADD chains can blip the playing state between
+     * utterances.
+     */
+    private fun onSpeechFinished() {
+        val r = reading.value ?: return
+        val advancing = sectionSpeaking
+        val resuming = !sectionSpeaking && resumeAfterAnswer && !busy.value
+        if (!advancing && !resuming) return
+        scope.launch {
+            kotlinx.coroutines.delay(600)
+            val rr = reading.value ?: return@launch
+            if (player.stateFlow.value.isPlaying || busy.value ||
+                voiceState.value != com.learnanywhere.speech.VoiceInput.State.IDLE) return@launch
+            if (advancing && sectionSpeaking) {
+                sectionSpeaking = false
+                speakSection(rr.index + 1)
+            } else if (resuming && resumeAfterAnswer) {
+                resumeAfterAnswer = false
+                speakSection(rr.index)
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -214,13 +323,21 @@ class UiController(
                     }
                 } else null
 
-                val reply = if (useGrounding.value) {
-                    app.agent.ask(q, onAnswerDelta = onDelta)
-                } else {
-                    app.agent.ask(q,
-                        systemExtra = "Ignore attached documents; answer from general knowledge and tag (general).",
-                        onAnswerDelta = onDelta)
+                // Read-with-me: give the agent the reading cursor as context,
+                // and arrange to resume reading once the answer is spoken.
+                val readingExtra = reading.value?.let { r ->
+                    resumeAfterAnswer = true
+                    "Reading session: you are reading the document \"${r.docTitle}\" to the user, " +
+                            "currently at section ${r.index + 1} of ${r.sections.size}. That section: " +
+                            "\"${r.sections[r.index].take(1200)}\". " +
+                            "Answer in the context of this passage when it applies."
                 }
+                val extras = listOfNotNull(
+                    if (useGrounding.value) null
+                    else "Ignore attached documents; answer from general knowledge and tag (general).",
+                    readingExtra
+                ).joinToString("\n\n").ifBlank { null }
+                val reply = app.agent.ask(q, systemExtra = extras, onAnswerDelta = onDelta)
                 chunker.flush()?.let { if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true } }
                 this@UiController.reply.value = reply
                 val citedTitle = reply.citedDocId?.let { id ->

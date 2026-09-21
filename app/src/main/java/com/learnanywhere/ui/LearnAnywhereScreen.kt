@@ -23,7 +23,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.AutoStories
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Delete
@@ -290,6 +292,7 @@ private fun LibraryState(
     ) {
         // Sessions entry #1: top-left, below the header.
         item { HistoryEntryButton(onOpenSessions) }
+        ctl.reading.value?.let { r -> item { ReadWithMeCard(ctl, r) } }
         item { AskCard(ctl) }
         if (ctl.thread.value.isNotEmpty()) {
             items(ctl.thread.value) { turn -> TurnBubble(turn) }
@@ -402,6 +405,12 @@ private fun DocRow(
                         text = { Text("Play this") },
                         leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
                         onClick = { menuOpen = false; ctl.playSingle(d.id) })
+                    if (d.text.isNotBlank()) {
+                        DropdownMenuItem(
+                            text = { Text("Read with me") },
+                            leadingIcon = { Icon(Icons.Outlined.AutoStories, null) },
+                            onClick = { menuOpen = false; ctl.startReadWithMe(d.id) })
+                    }
                     DropdownMenuItem(
                         text = { Text(if (checked) "Deselect" else "Select") },
                         leadingIcon = { Icon(Icons.Outlined.Check, null) },
@@ -436,6 +445,59 @@ private fun docSubtitle(d: Document): String = when (d.source) {
     }
     Document.Source.URL -> runCatching { Uri.parse(d.provenance).host }.getOrNull() ?: d.provenance
     Document.Source.TEXT -> "Pasted · ${d.text.length} chars"
+}
+
+// =====================================================================
+// READ WITH ME
+
+@Composable
+private fun ReadWithMeCard(ctl: UiController, r: UiController.ReadingState) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.AutoStories, contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(r.docTitle, style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Section ${r.index + 1} of ${r.sections.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton(onClick = { ctl.endReadWithMe() }) {
+                    Icon(Icons.Outlined.Close, contentDescription = "End reading")
+                }
+            }
+            // Read-along: the section currently being spoken.
+            Text(r.sections[r.index],
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 10, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState()))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { ctl.prevSection() }, enabled = r.index > 0) {
+                    Icon(Icons.Outlined.SkipPrevious, null, modifier = Modifier.size(18.dp))
+                }
+                OutlinedButton(onClick = { ctl.nextSection() }) {
+                    Icon(Icons.Outlined.SkipNext, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp)); Text("Next")
+                }
+                Text("Speak to interrupt — ask, or say “next section”.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f))
+            }
+        }
+    }
 }
 
 // =====================================================================
