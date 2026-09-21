@@ -103,6 +103,43 @@ class DocumentStore(
         doc
     }
 
+    /**
+     * Add a PDF the agent downloaded (bytes in hand, no SAF URI). Bytes are
+     * written under filesDir/downloads/ so the standard persistence path
+     * ([LearnAnywhereApp.persistPdf] reads the locator) copies them into the
+     * byte store like any other PDF.
+     */
+    suspend fun addDownloadedPdf(title: String, bytes: ByteArray, sourceUrl: String): Result<Document> = runCatching {
+        val dir = java.io.File(context.filesDir, "downloads").apply { mkdirs() }
+        val f = java.io.File(dir, UUID.randomUUID().toString() + ".pdf")
+        f.writeBytes(bytes)
+        val pages = PdfFigureExtractor.extract(bytes, title, quality = 65)
+        val figures = pages.map { p ->
+            Figure(
+                id = UUID.randomUUID().toString(),
+                title = p.title,
+                caption = p.caption,
+                mimeType = p.mime,
+                bytes = p.bytes,
+                source = Figure.SourceRef.PDF_PAGE,
+                isFigureCandidate = p.isFigureCandidate
+            )
+        }
+        val doc = Document(
+            id = UUID.randomUUID().toString(),
+            title = title,
+            source = Document.Source.PDF,
+            pdfLocator = "file://" + f.absolutePath,
+            text = PdfText.extract(bytes),
+            provenance = sourceUrl,
+            figures = figures,
+            order = _docs.size
+        )
+        _docs[doc.id] = doc
+        onPdfAdded?.invoke(doc)
+        doc
+    }
+
     fun remove(id: String) {
         _docs.remove(id)
         onRemoved?.invoke(id)

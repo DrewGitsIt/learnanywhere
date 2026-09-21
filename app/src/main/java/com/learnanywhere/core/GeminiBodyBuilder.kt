@@ -14,7 +14,13 @@ object GeminiBodyBuilder {
         val text: String? = null,
         val mime: String? = null,
         val dataB64: String? = null,
-        val fileUri: String? = null
+        val fileUri: String? = null,
+        /**
+         * Pre-serialized part JSON, emitted verbatim. Used by the tool loop
+         * to echo the model's own parts (functionCall + thoughtSignature —
+         * both MUST round-trip unaltered) and to send functionResponse parts.
+         */
+        val rawJson: String? = null
     )
 
     data class Message(val role: String, val parts: List<Part> = listOf())
@@ -31,7 +37,9 @@ object GeminiBodyBuilder {
         maxOutputTokens: Int,
         enableGoogleSearch: Boolean = false,
         thinkingLevel: String? = null,
-        responseSchemaJson: String? = null
+        responseSchemaJson: String? = null,
+        /** Raw JSON array of function declarations (see AgentTools). */
+        functionDeclarationsJson: String? = null
     ): String {
         val sb = StringBuilder().append("{")
         sb.append("\"contents\":[")
@@ -62,15 +70,24 @@ object GeminiBodyBuilder {
                 .append(responseSchemaJson)
         }
         sb.append("}")
-        if (enableGoogleSearch) {
+        if (enableGoogleSearch || functionDeclarationsJson != null) {
+            val tools = ArrayList<String>()
             // Google Search grounding — free tier includes it (DESIGN.md §3.4).
-            sb.append(",\"tools\":[{\"google_search\":{}}]")
+            if (enableGoogleSearch) tools.add("{\"google_search\":{}}")
+            functionDeclarationsJson?.let { tools.add("{\"functionDeclarations\":$it}") }
+            sb.append(",\"tools\":[").append(tools.joinToString(",")).append("]")
+            if (enableGoogleSearch && functionDeclarationsJson != null) {
+                // Gemini 3 combo requirement; mode defaults to VALIDATED
+                // (AUTO is unsupported when built-in + custom tools combine).
+                sb.append(",\"toolConfig\":{\"includeServerSideToolInvocations\":true}")
+            }
         }
         sb.append("}")
         return sb.toString()
     }
 
     private fun Part.toJson(): String = buildString {
+        rawJson?.let { return it }   // verbatim echo (tool loop)
         // Part is a union type: exactly one of text / inlineData / fileData.
         val parts = ArrayList<String>()
         text?.let { parts.add("\"text\":\"${escape(it)}\"") }

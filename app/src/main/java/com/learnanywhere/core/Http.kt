@@ -31,4 +31,34 @@ object Http {
 
     private fun stripHtml(html: String): String =
         com.learnanywhere.core.UrlText.stripHtml(html)
+
+    /**
+     * Fetch raw bytes + Content-Type (for the download_document tool).
+     * Capped at [maxBytes] so a bad link can't fill memory.
+     */
+    fun fetchBytes(url: String, maxBytes: Long = 30L * 1024 * 1024): Pair<ByteArray, String?> {
+        val req = Request.Builder().url(url).get()
+            .header("User-Agent", "LearnAnywhere/1.0 (educational reader)")
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
+            val body = resp.body ?: throw java.io.IOException("empty body")
+            val len = body.contentLength()
+            if (len > maxBytes) throw java.io.IOException("file too large (${len / 1024 / 1024} MB)")
+            val bytes = body.byteStream().use { ins ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > maxBytes) throw java.io.IOException("file too large (>${maxBytes / 1024 / 1024} MB)")
+                    out.write(buf, 0, n)
+                }
+                out.toByteArray()
+            }
+            return bytes to resp.header("Content-Type")
+        }
+    }
 }

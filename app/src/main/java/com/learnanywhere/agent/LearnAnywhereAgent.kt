@@ -23,7 +23,8 @@ class LearnAnywhereAgent(
     private val model: () -> String,
     private val docs: () -> List<Document>,
     private val appCtx: Context,
-    private val webSearch: () -> Boolean = { true }
+    private val webSearch: () -> Boolean = { true },
+    private val tools: AgentTools? = null
 ) {
     data class AgentReply(
         val text: String,
@@ -76,37 +77,61 @@ class LearnAnywhereAgent(
             val userMsg = Gemini.Message("user", listOf(Gemini.Part(text = question)))
 
             try {
-                fun call(contents: List<Gemini.Message>, withSchema: Boolean) =
+                var useSchema = true
+                fun call(contents: List<Gemini.Message>) =
                     client.generateText(
                         contents = contents,
                         systemInstruction = sys,
                         enableSearch = searchOn,
-                        responseSchemaJson = if (withSchema) RESPONSE_SCHEMA else null
+                        responseSchemaJson = if (useSchema) RESPONSE_SCHEMA else null,
+                        functionDeclarationsJson = tools?.declarationsJson
                     )
 
                 val (grounding, usedFiles) = buildGrounding(inlineOnly = false)
-                var contents = grounding + history.toList() + listOf(userMsg)
-                val reply = try {
-                    call(contents, withSchema = true)
+                var base = grounding + history.toList() + listOf(userMsg)
+                var reply = try {
+                    call(base)
                 } catch (e: GeminiError) {
                     when {
                         // A cached Files-API URI may have expired server-side:
                         // invalidate and retry once with inline bytes.
                         usedFiles && e.code in 400..404 -> {
                             docsHere.forEach { filePrefs.edit().remove(it.id).apply() }
-                            contents = buildGrounding(inlineOnly = true).first +
+                            base = buildGrounding(inlineOnly = true).first +
                                     history.toList() + listOf(userMsg)
                             try {
-                                call(contents, withSchema = true)
+                                call(base)
                             } catch (e2: GeminiError) {
-                                if (e2.code == 400) call(contents, withSchema = false) else throw e2
+                                if (e2.code == 400) { useSchema = false; call(base) } else throw e2
                             }
                         }
                         // Some model/tool combos may reject responseSchema:
                         // degrade to plain text (regex citations still work).
-                        e.code == 400 -> call(contents, withSchema = false)
+                        e.code == 400 -> { useSchema = false; call(base) }
                         else -> throw e
                     }
+                }
+
+                // ---- tool loop (DESIGN §3.7): execute functionCalls until the
+                // model answers in text. The model's own parts are echoed back
+                // VERBATIM (thoughtSignature + functionCall.id must round-trip);
+                // tool failures return to the model as {error}, never thrown.
+                val toolTurns = ArrayList<Gemini.Message>()
+                var iterations = 0
+                while (reply.functionCalls.isNotEmpty() && iterations < MAX_TOOL_ITERATIONS) {
+                    iterations++
+                    toolTurns.add(Gemini.Message("model",
+                        reply.rawParts.map { Gemini.Part(rawJson = it) }))
+                    val responses = reply.functionCalls.map { fc ->
+                        val result = tools?.execute(fc.name, fc.argsJson)
+                            ?: "{\"error\":\"no tools available\"}"
+                        val idField = fc.id?.let { "\"id\":\"$it\"," } ?: ""
+                        Gemini.Part(rawJson =
+                            "{\"functionResponse\":{" + idField +
+                                    "\"name\":\"${fc.name}\",\"response\":" + result + "}}")
+                    }
+                    toolTurns.add(Gemini.Message("user", responses))
+                    reply = call(base + toolTurns)
                 }
 
                 val parsed = ReplyJson.parse(reply.text)
@@ -201,11 +226,19 @@ class LearnAnywhereAgent(
         appendLine("- If the answer is not in the attached documents, say so briefly, then")
         appendLine("  answer from general knowledge" +
                 (if (searchOn) " or web search." else "."))
-        if (searchOn) {
+        if (searchOn || tools != null) {
             appendLine()
             appendLine("# Tools")
-            appendLine("Use Google Search for ancillary or current information; prefer the")
-            appendLine("attached documents for questions about their content.")
+            if (searchOn) {
+                appendLine("Use Google Search for ancillary or current information; prefer the")
+                appendLine("attached documents for questions about their content.")
+            }
+            if (tools != null) {
+                appendLine("When the user asks you to find or fetch a paper or article, locate")
+                appendLine("it (searching if needed), check list_library for duplicates, then")
+                appendLine("call download_document with the direct URL. Confirm out loud what")
+                appendLine("was added and whether it can be read aloud.")
+            }
         }
         systemExtra?.let { appendLine(); appendLine(it) }
     }
@@ -230,6 +263,9 @@ class LearnAnywhereAgent(
     companion object {
         /** Kept small: doc grounding is re-sent every call, so context adds up fast. */
         private const val MAX_HISTORY_TURNS = 10
+
+        /** Hard cap on tool-loop rounds (best practice: 5–10 for a small agent). */
+        private const val MAX_TOOL_ITERATIONS = 5
 
         /** Structured-output schema for [ask] replies (Gemini 3 allows this with tools). */
         internal const val RESPONSE_SCHEMA = """{"type":"object","properties":{""" +

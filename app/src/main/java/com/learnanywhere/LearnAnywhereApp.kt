@@ -62,7 +62,8 @@ class LearnAnywhereApp : Application() {
             model = { prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL).orEmpty() },
             docs = { store.docs },
             appCtx = this,
-            webSearch = { prefs.getBoolean(KEY_WEB_SEARCH, true) }
+            webSearch = { prefs.getBoolean(KEY_WEB_SEARCH, true) },
+            tools = com.learnanywhere.agent.AgentTools(store)
         )
         ui = com.learnanywhere.ui.UiController(this)
 

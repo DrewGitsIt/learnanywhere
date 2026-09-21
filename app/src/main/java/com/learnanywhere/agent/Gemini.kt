@@ -31,7 +31,9 @@ class Gemini(
     data class Part(val text: String? = null,
                     val mime: String? = null,
                     val dataB64: String? = null,
-                    val fileUri: String? = null)
+                    val fileUri: String? = null,
+                    /** Verbatim part JSON (tool-loop echo / functionResponse). */
+                    val rawJson: String? = null)
 
     data class Message(val role: String, val parts: List<Part>)
 
@@ -60,12 +62,23 @@ class Gemini(
              dataB64 = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8)))
     ))
 
+    /** A custom-tool invocation requested by the model. */
+    data class FunctionCall(val name: String, val id: String?, val argsJson: String)
+
     data class Response(
         val text: String,
         val promptTokens: Int?,
         val completionTokens: Int?,
         /** "title — uri" per grounding source when search grounding was used. */
-        val sources: List<String> = emptyList()
+        val sources: List<String> = emptyList(),
+        /** Custom-tool calls the model wants executed (empty = final answer). */
+        val functionCalls: List<FunctionCall> = emptyList(),
+        /**
+         * The candidate's parts, verbatim JSON. When functionCalls is
+         * non-empty these MUST be echoed back as the model turn unaltered —
+         * they carry thoughtSignature and functionCall.id.
+         */
+        val rawParts: List<String> = emptyList()
     )
 
     // ------------------------------------------------------------------
@@ -78,7 +91,8 @@ class Gemini(
         maxTokens: Int = 4096,
         enableSearch: Boolean = false,
         thinkingLevel: String? = "low",
-        responseSchemaJson: String? = null
+        responseSchemaJson: String? = null,
+        functionDeclarationsJson: String? = null
     ): Response {
         val body = GeminiBodyBuilder.generateContent(
             contents = contents.map { m -> m.toBody() },
@@ -88,7 +102,8 @@ class Gemini(
             maxOutputTokens = maxTokens,
             enableGoogleSearch = enableSearch,
             thinkingLevel = thinkingLevel,
-            responseSchemaJson = responseSchemaJson
+            responseSchemaJson = responseSchemaJson,
+            functionDeclarationsJson = functionDeclarationsJson
         )
         val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
                 (model().ifBlank { DEFAULT_MODEL }) + ":generateContent"
@@ -195,7 +210,7 @@ class Gemini(
 
     private fun Message.toBody() =
         GeminiBodyBuilder.Message(role, parts.map { p ->
-            GeminiBodyBuilder.Part(p.text, p.mime, p.dataB64, p.fileUri)
+            GeminiBodyBuilder.Part(p.text, p.mime, p.dataB64, p.fileUri, p.rawJson)
         })
 
     /**
@@ -209,6 +224,8 @@ class Gemini(
         val sb = StringBuilder()
         var finishReason: String? = null
         val sources = ArrayList<String>()
+        val fcalls = ArrayList<FunctionCall>()
+        val rawParts = ArrayList<String>()
         o.optJSONArray("candidates")?.let { cands ->
             if (cands.length() > 0) {
                 val c0 = cands.getJSONObject(0)
@@ -216,7 +233,15 @@ class Gemini(
                 c0.optJSONObject("content")?.optJSONArray("parts")?.let { parts ->
                     for (i in 0 until parts.length()) {
                         val p = parts.getJSONObject(i)
+                        rawParts.add(p.toString())
                         if (!p.optBoolean("thought", false)) sb.append(p.optString("text"))
+                        p.optJSONObject("functionCall")?.let { fc ->
+                            fcalls.add(FunctionCall(
+                                fc.getString("name"),
+                                fc.optString("id").ifBlank { null },
+                                fc.optJSONObject("args")?.toString() ?: "{}"
+                            ))
+                        }
                     }
                 }
                 // Search-grounding citations, when the tool was used.
@@ -234,7 +259,7 @@ class Gemini(
         }
         val usage = o.optJSONObject("usageMetadata")
         val text = sb.toString()
-        if (text.isBlank() && finishReason != null) {
+        if (text.isBlank() && fcalls.isEmpty() && finishReason != null) {
             // e.g. MAX_TOKENS with the whole budget spent on thinking.
             throw GeminiError(200, "empty reply (finishReason=$finishReason)")
         }
@@ -242,7 +267,9 @@ class Gemini(
             text,
             usage?.takeIf { it.has("promptTokenCount") }?.getInt("promptTokenCount"),
             usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount"),
-            sources
+            sources,
+            fcalls,
+            rawParts
         )
     }
 

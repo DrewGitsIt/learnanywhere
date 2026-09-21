@@ -81,6 +81,68 @@ class LearnAnywherePureTest {
         assertEquals(body.count { it == '{' }, body.count { it == '}' }, "unbalanced braces")
     }
 
+    /** Tool loop plumbing: combo tools emission and raw-part echo. */
+    @Test
+    fun geminiBodyEmitsFunctionDeclarationsComboAndRawParts() {
+        val decls = """[{"name":"download_document","description":"d","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}]"""
+        val body = GeminiBodyBuilder.generateContent(
+            contents = listOf(GeminiBodyBuilder.Message("user", listOf(
+                GeminiBodyBuilder.Part(rawJson = """{"functionResponse":{"id":"c1","name":"download_document","response":{"status":"added"}}}""")
+            ))),
+            systemInstruction = null,
+            temperature = 1.0f, topP = 0.95f, maxOutputTokens = 1024,
+            enableGoogleSearch = true,
+            functionDeclarationsJson = decls
+        )
+        assertTrue(body.contains("{\"google_search\":{}}"), "google_search missing from combo")
+        assertTrue(body.contains("\"functionDeclarations\":[{\"name\":\"download_document\""), "declarations missing")
+        assertTrue(body.contains("\"toolConfig\":{\"includeServerSideToolInvocations\":true}"), "toolConfig missing")
+        assertTrue(body.contains("\"functionResponse\":{\"id\":\"c1\""), "raw part not passed through verbatim")
+        assertEquals(body.count { it == '{' }, body.count { it == '}' }, "unbalanced braces")
+
+        // Search-only requests must NOT carry the combo toolConfig.
+        val searchOnly = GeminiBodyBuilder.generateContent(
+            listOf(GeminiBodyBuilder.Message("user", listOf(GeminiBodyBuilder.Part(text = "q")))),
+            null, 1.0f, 0.95f, 64, enableGoogleSearch = true)
+        assertFalse(searchOnly.contains("includeServerSideToolInvocations"))
+    }
+
+    /** functionCall responses parse into calls; rawParts keep thoughtSignature verbatim. */
+    @Test
+    fun geminiParseExtractsFunctionCalls() {
+        val g = com.learnanywhere.agent.Gemini({ "key" }, { "model" })
+        val body = """
+            {
+              "candidates": [
+                {
+                  "content": {
+                    "parts": [
+                      {
+                        "functionCall": {
+                          "id": "call_1",
+                          "name": "download_document",
+                          "args": { "url": "https://arxiv.org/pdf/1706.03762", "title": "Attention Is All You Need" }
+                        },
+                        "thoughtSignature": "SIG_ABC"
+                      }
+                    ],
+                    "role": "model"
+                  },
+                  "finishReason": "STOP",
+                  "index": 0
+                }
+              ]
+            }
+        """.trimIndent()
+        val r = g.parse(body)   // must NOT throw despite empty text
+        assertEquals(1, r.functionCalls.size)
+        assertEquals("download_document", r.functionCalls[0].name)
+        assertEquals("call_1", r.functionCalls[0].id)
+        assertTrue(r.functionCalls[0].argsJson.contains("arxiv.org"))
+        assertEquals(1, r.rawParts.size)
+        assertTrue(r.rawParts[0].contains("SIG_ABC"), "thoughtSignature must survive verbatim")
+    }
+
     /** Structured replies parse into fields; non-JSON falls back to null. */
     @Test
     fun replyJsonParsesStructuredAnswer() {

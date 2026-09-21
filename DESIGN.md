@@ -286,11 +286,14 @@ Logic + App Check is the path if this ever ships).
    schema+search combo pending — we exhausted the free quota testing on
    2026-09-21; first real ask next session confirms it (fallbacks in
    place either way).
-6. **Fetch-document tool**: function calling combined with google_search
-   (Gemini 3 combo per §3.7 — includeServerSideToolInvocations +
-   thoughtSignature/id round-tripping), `download_document(url)` lands the
-   file in the library via the existing add path. Closes the "remote
-   documents I know exist" workflow.
+6. ~~Fetch-document tool~~ — **done 2026-09-21**: real function-calling
+   loop (`AgentTools`: `download_document` + `list_library`; max 5
+   rounds; model parts echoed verbatim with thoughtSignature/id; tool
+   errors returned to the model as `{error}`). PDFs land via
+   `DocumentStore.addDownloadedPdf` (figures + text + persistence, 30 MB
+   cap); HTML becomes a text doc. Combined with google_search via
+   `includeServerSideToolInvocations`. ⚠️ Live-verification pending same
+   as #5 (quota); the loop mechanics are unit-tested.
 7. **Voice loop v2**: streamed Gemini responses (SSE) → sentence-chunked
    TTS, read-along highlight, barge-in. Consider migrating to the
    Interactions API as part of this (§3.7).
