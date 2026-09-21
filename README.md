@@ -233,10 +233,12 @@ Done in this pass:  (a) figure extraction + on-demand vision captions ·
 (play-all / ask / figures / per-doc) via `MediaBrowserService`.
 
 Remaining (priority order):
-1. **Offline PDF *text***: we rely on Gemini reading the PDF (it does, free
-   tier). For fully-offline text, add `org.apache.tika:tika-core` or
-   `org.apache.pdfbox:pdfbox-android` and fill
-   `DocumentStore.extractPdfText()` (a 1-line swap; documented there).
+1. ~~Offline PDF *text*~~ — **done (2026-09-21)**: `pdfbox-android` extracts
+   the text layer at add-time (`data/PdfText.kt`, with TTS-friendly re-flow:
+   de-hyphenation + line joining), and `LearnAnywhereApp.backfillPdfText`
+   upgrades PDFs added before the feature existed. Scanned/image-only PDFs
+   still have no text and stay silent in audiobook mode (Gemini Q&A still
+   works on them).
 2. **Real paper-figure paths**: we score pages for figure-candidacy and caption
    them via Gemini vision (verified). For *vector* figure extraction with true
    captions, add a PDF-native library (`pdfbox-android`) and replace the

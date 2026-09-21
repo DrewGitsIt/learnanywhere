@@ -53,8 +53,9 @@ class DocumentStore(
                 isFigureCandidate = p.isFigureCandidate
             )
         }
-        // Best-effort offline text (Gemini reads PDFs natively anyway).
-        val text = extractPdfText(bytes)
+        // Offline text layer — powers TTS playback of the PDF. (Gemini reads
+        // the PDF bytes natively for Q&A regardless.)
+        val text = PdfText.extract(bytes)
 
         val doc = Document(
             id = UUID.randomUUID().toString(),
@@ -145,18 +146,6 @@ class DocumentStore(
         }
         return uri.lastPathSegment ?: "document.pdf"
     }
-
-    /**
-     * Offline text extraction. Currently returns "" (Gemini reads PDFs natively
-     * on the free tier — that's the primary path). To add real offline text
-     * extraction, swap for a Tika or PDFBox call:
-     *
-     *   implementation("org.apache.pdfbox:pdfbox-android:2.0.27")
-     *   return org.apache.pdfbox.pdmodel.PDDocument.load(bytes).use { d ->
-     *       org.apache.pdfbox.text.PDFTextExtractor(d).getTextFromDocument(d)
-     *   }
-     */
-    private fun extractPdfText(bytes: ByteArray): String = ""
 
     companion object {
         private const val TAG = "DocumentStore"

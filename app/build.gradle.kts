@@ -64,6 +64,9 @@ dependencies {
     implementation("androidx.media3:media3-session:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
 
+    // Offline PDF text extraction (lets the audiobook read PDFs aloud)
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
     // Room (KSP) for library persistence
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")

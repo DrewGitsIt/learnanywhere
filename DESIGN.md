@@ -159,8 +159,9 @@ mic (16 kHz, foreground service)
 
 1. **Fix the live Gemini 4xx** (error text now readable) and verify the fixes
    in STATUS.md on device.
-2. **PDF text extraction** (pdfbox-android) — unblocks reading papers aloud,
-   the core promise. Keep Gemini's native PDF reading for Q&A grounding.
+2. ~~PDF text extraction~~ — **done 2026-09-21** (pdfbox-android 2.0.27.0,
+   `data/PdfText.kt`, add-time extraction + cold-start backfill). Scanned
+   PDFs remain text-less (would need OCR — ML Kit on-device is an option).
 3. **Voice input v1**: sherpa-onnx AAR + Silero VAD + streaming zipformer
    int8; push-to-talk first, then VAD-gated continuous. Live partials shown
    in the UI (start of the "mirror").

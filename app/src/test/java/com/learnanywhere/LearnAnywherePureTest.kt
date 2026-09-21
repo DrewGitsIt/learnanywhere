@@ -121,6 +121,14 @@ class LearnAnywherePureTest {
         assertTrue(com.learnanywhere.core.Figures.totalDeviationFromWhite(16, 34, 51) > 30)
     }
 
+    /** PDF text re-flow: de-hyphenate wraps, join lines, keep paragraphs. */
+    @Test
+    fun pdfTextNormalizeReflowsForTts() {
+        val raw = "Neural net-\nworks are great.\nThey learn features.\n\nNext paragraph\nhere."
+        val out = com.learnanywhere.data.PdfText.normalize(raw)
+        assertEquals("Neural networks are great. They learn features.\n\nNext paragraph here.", out)
+    }
+
     /** (a) Caption prompt is present, non-trivial, and consistent. */
     @Test
     fun captionPromptNamesTheDocumentAndFigure() {

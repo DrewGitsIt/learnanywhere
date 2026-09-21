@@ -54,11 +54,11 @@
 8. (Android Auto) — app should now appear in AA's media apps list
 
 ## Known limitations (not bugs, but the honest state)
-- **PDF audiobook is silent**: `DocumentStore.extractPdfText()` returns `""`,
-  and the player skips empty docs — so "listen to my paper" only works for
-  URL/pasted text today. Gemini *answers* about PDFs fine (it reads the bytes
-  natively); it's only local TTS reading that needs a text layer. Fix: pdfbox-
-  android or Gemini-side "read this document aloud" text generation.
+- ~~PDF audiobook is silent~~ — **fixed 2026-09-21**: pdfbox-android extracts
+  the text layer at add-time (`PdfText.extract`, re-flowed for TTS), and a
+  cold-start backfill upgrades previously-added PDFs. Remaining gap: scanned
+  (image-only) PDFs have no text layer and still won't play; Gemini Q&A on
+  them works regardless.
 - `Gemini.kt` hand-parses JSON with regex/scanning; fine for the happy path,
   brittle for e.g. `"text"` fields containing escaped quotes in unusual spots.
   Consider org.json (available on Android; keep the pure JVM test in mind).

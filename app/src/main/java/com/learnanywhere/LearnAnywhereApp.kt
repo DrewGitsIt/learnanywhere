@@ -45,6 +45,9 @@ class LearnAnywhereApp : Application() {
         super.onCreate()
         instance = this
 
+        // pdfbox-android needs its resources loaded once before any PDF parse.
+        com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(applicationContext)
+
         prefs = getSharedPreferences("learnanywhere", MODE_PRIVATE)
         db = AppDatabase(this)
         store = DocumentStore(this)
@@ -85,8 +88,32 @@ class LearnAnywhereApp : Application() {
                 }
                 store.hydrate(rehydrated)
                 ui.refreshFromStore()
+                backfillPdfText(rows)
             }
         }
+    }
+
+    /**
+     * PDFs added before offline text extraction existed have text == "" in
+     * Room (and so are silent in audiobook mode). Extract once from the
+     * persisted bytes and upsert; the Room flow re-emits with the text
+     * attached. Scanned/image-only PDFs stay blank and are retried next cold
+     * start (cheap no-op).
+     */
+    private val backfillInFlight = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private fun backfillPdfText(rows: List<DocumentRow>) {
+        rows.filter { it.source == "PDF" && it.text.isBlank() && backfillInFlight.add(it.id) }
+            .forEach { row ->
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val text = com.learnanywhere.data.PdfText.extract(db.pdfStore.readPdf(row.id))
+                        if (text.isNotBlank()) db.db.documents().upsert(row.copy(text = text))
+                    } finally {
+                        backfillInFlight.remove(row.id)
+                    }
+                }
+            }
     }
 
     // ------------------------------------------------------------------
