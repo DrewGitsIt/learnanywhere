@@ -44,6 +44,7 @@ class UiController(
 
     // ---- settings ----
     val useGrounding = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_GROUNDING, true))
+    val webSearch = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_WEB_SEARCH, true))
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
 
@@ -255,6 +256,19 @@ class UiController(
     fun toggleGrounding(v: Boolean) {
         useGrounding.value = v
         app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_GROUNDING, v).apply()
+    }
+
+    fun toggleWebSearch(v: Boolean) {
+        webSearch.value = v
+        app.prefs.edit().putBoolean(LearnAnywhereApp.KEY_WEB_SEARCH, v).apply()
+    }
+
+    /** Forget the multi-turn conversation and clear the reply card. */
+    fun newChat() {
+        app.agent.clearHistory()
+        reply.value = null
+        question.value = null
+        error.value = null
     }
 
     // ---- (a) on-demand figure caption (Gemini vision) ----

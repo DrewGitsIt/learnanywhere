@@ -41,7 +41,7 @@ class VoiceInput(
     private val context: Context,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 ) {
-    enum class State { IDLE, LOADING, LISTENING }
+    enum class State { IDLE, LOADING, LISTENING, TRANSCRIBING }
 
     private val _state = MutableStateFlow(State.IDLE)
     val state: StateFlow<State> get() = _state.asStateFlow()
@@ -160,8 +160,16 @@ class VoiceInput(
                 if (finalText.isBlank()) finalText = rec.getResult(stream).text.trim()
                 if (finalText.isNotBlank()) {
                     lastZipformer.value = finalText
-                    launchWhisperPass(recorded, recordedSamples)
-                    withContext(Dispatchers.Main) { onFinal(finalText) }
+                    // Two-pass (A/B verdict 2026-09-21: whisper is much more
+                    // accurate): stop the mic, re-decode the utterance with
+                    // Whisper, and ask with ITS text; zipformer is the live
+                    // preview and the fallback.
+                    try { record.stop() } catch (_: Throwable) {}
+                    _state.value = State.TRANSCRIBING
+                    val heard = whisperDecode(recorded, recordedSamples)
+                        ?.takeIf { it.isNotBlank() } ?: finalText
+                    partial.value = heard
+                    withContext(Dispatchers.Main) { onFinal(heard) }
                 }
             } finally {
                 stream.release()
@@ -178,29 +186,29 @@ class VoiceInput(
     // ------------------------------------------------------------------
     // Whisper comparison pass
 
-    private fun launchWhisperPass(chunks: List<FloatArray>, total: Int) {
-        if (total == 0) { whisperText.value = null; return }
+    /** Runs on the session's IO thread; returns null on failure. */
+    private fun whisperDecode(chunks: List<FloatArray>, total: Int): String? {
+        if (total == 0) { whisperText.value = null; return null }
         val samples = FloatArray(total)
         var off = 0
         for (c in chunks) { c.copyInto(samples, off); off += c.size }
         whisperBusy.value = true
         whisperText.value = null
-        scope.launch(Dispatchers.IO) {
+        return try {
+            val w = ensureWhisper()
+            val stream = w.createStream()
             try {
-                val w = ensureWhisper()
-                val stream = w.createStream()
-                try {
-                    stream.acceptWaveform(samples, SAMPLE_RATE)
-                    w.decode(stream)
-                    whisperText.value = w.getResult(stream).text.trim()
-                } finally {
-                    stream.release()
-                }
-            } catch (t: Throwable) {
-                whisperText.value = "(whisper failed: ${t.message})"
+                stream.acceptWaveform(samples, SAMPLE_RATE)
+                w.decode(stream)
+                w.getResult(stream).text.trim().also { whisperText.value = it }
             } finally {
-                whisperBusy.value = false
+                stream.release()
             }
+        } catch (t: Throwable) {
+            whisperText.value = "(whisper failed: ${t.message})"
+            null
+        } finally {
+            whisperBusy.value = false
         }
     }
 

@@ -27,7 +27,8 @@ object GeminiBodyBuilder {
         systemInstruction: String?,
         temperature: Float,
         topP: Float,
-        maxOutputTokens: Int
+        maxOutputTokens: Int,
+        enableGoogleSearch: Boolean = false
     ): String {
         val sb = StringBuilder().append("{")
         sb.append("\"contents\":[")
@@ -48,6 +49,10 @@ object GeminiBodyBuilder {
         sb.append(",\"generationConfig\":{\"temperature\":")
             .append(temperature).append(",\"topP\":").append(topP)
             .append(",\"maxOutputTokens\":").append(maxOutputTokens).append("}")
+        if (enableGoogleSearch) {
+            // Google Search grounding — free tier includes it (DESIGN.md §3.4).
+            sb.append(",\"tools\":[{\"google_search\":{}}]")
+        }
         sb.append("}")
         return sb.toString()
     }

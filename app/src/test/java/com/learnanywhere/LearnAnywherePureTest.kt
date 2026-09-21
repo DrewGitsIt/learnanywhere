@@ -48,6 +48,17 @@ class LearnAnywherePureTest {
         assertEquals(open, close, "unbalanced braces: open=$open close=$close")
     }
 
+    /** Search grounding: the google_search tool must appear only when enabled. */
+    @Test
+    fun geminiBodyIncludesSearchToolOnlyWhenEnabled() {
+        val msg = listOf(GeminiBodyBuilder.Message("user", listOf(GeminiBodyBuilder.Part(text = "q"))))
+        val with = GeminiBodyBuilder.generateContent(msg, null, 0.4f, 0.95f, 64, enableGoogleSearch = true)
+        val without = GeminiBodyBuilder.generateContent(msg, null, 0.4f, 0.95f, 64)
+        assertTrue(with.contains("\"tools\":[{\"google_search\":{}}]"), "search tool missing")
+        assertFalse(without.contains("tools"), "search tool should be absent by default")
+        assertEquals(with.count { it == '{' }, with.count { it == '}' }, "unbalanced braces")
+    }
+
     /** Escape() must emit spec-compliant JSON string literals. */
     @Test
     fun escapeProducesValidJsonStringContent() {

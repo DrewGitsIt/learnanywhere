@@ -12,14 +12,25 @@ class LearnAnywhereAgent(
     private val api: () -> String,
     private val model: () -> String,
     private val docs: () -> List<Document>,
-    private val appCtx: android.content.Context
+    private val appCtx: android.content.Context,
+    private val webSearch: () -> Boolean = { true }
 ) {
     data class AgentReply(
         val text: String,
         val citedDocId: String?,
         val citedFigure: String?,
-        val usage: String?
+        val usage: String?,
+        val sources: List<String> = emptyList()
     )
+
+    /**
+     * Multi-turn conversation history (user/model text turns only — the doc
+     * grounding parts are re-sent fresh each call). Process-lifetime;
+     * [clearHistory] starts a new conversation.
+     */
+    private val history = ArrayDeque<Gemini.Message>()
+
+    fun clearHistory() = history.clear()
 
     suspend fun ask(question: String, systemExtra: String? = null): AgentReply =
         withContext(Dispatchers.IO) {
@@ -36,8 +47,9 @@ class LearnAnywhereAgent(
                 }
             }
 
+            val searchOn = webSearch()
             val sys = buildString {
-                appendLine("You are LearnAnywhere, an on-vehicle study companion. " +
+                appendLine("You are LearnAnywhere, a hands-free study companion. " +
                         "You are grounded in the attached documents.")
                 appendLine("Every answer must:")
                 appendLine("  1. Cite the source document by title.")
@@ -45,14 +57,24 @@ class LearnAnywhereAgent(
                 appendLine("  3. Be plain and spoken-friendly.")
                 appendLine("  4. Stay concise — 2 to 5 sentences unless asked.")
                 appendLine("  5. If outside the attached docs, say so, then answer from knowledge, tagged (general).")
+                if (searchOn)
+                    appendLine("  6. Use Google Search for ancillary or current information; " +
+                            "prefer the attached documents for questions about them.")
+                appendLine("The user may be speaking; questions can have transcription errors — " +
+                        "interpret them charitably.")
                 systemExtra?.let { appendLine(); appendLine(it) }
             }
 
             try {
+                val userMsg = Gemini.Message("user", listOf(Gemini.Part(text = question)))
                 val reply = client.generateText(
-                    contents = grounding + listOf(Gemini.Message("user", listOf(Gemini.Part(text = question)))),
-                    systemInstruction = sys
+                    contents = grounding + history.toList() + listOf(userMsg),
+                    systemInstruction = sys,
+                    enableSearch = searchOn
                 )
+                history.addLast(userMsg)
+                history.addLast(Gemini.Message("model", listOf(Gemini.Part(text = reply.text))))
+                while (history.size > MAX_HISTORY_TURNS * 2) history.removeFirst()
                 val fig = Regex("Figure[\\s:-]*([A-Za-z0-9_\\-./]+)", RegexOption.IGNORE_CASE).find(reply.text)
                 val citedDoc = docsHere.firstOrNull { d ->
                     reply.text.contains(d.title, ignoreCase = true) ||
@@ -60,7 +82,7 @@ class LearnAnywhereAgent(
                 }?.id
                 val usage = if (reply.promptTokens != null || reply.completionTokens != null)
                     "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" else null
-                AgentReply(reply.text, citedDoc, fig?.groupValues?.get(1), usage)
+                AgentReply(reply.text, citedDoc, fig?.groupValues?.get(1), usage, reply.sources)
             } catch (e: Exception) {
                 AgentReply("Connection problem: " + (e.message ?: "unknown"), null, null, null)
             }
@@ -89,6 +111,11 @@ class LearnAnywhereAgent(
         Document.Source.TEXT  -> "text/plain"
         Document.Source.URL   -> if (d.provenance.endsWith(".html")) "text/html" else "text/plain"
         Document.Source.PDF   -> "application/pdf"
+    }
+
+    companion object {
+        /** Kept small: doc grounding is re-sent every call, so context adds up fast. */
+        private const val MAX_HISTORY_TURNS = 10
     }
 
     private fun loadPdf(d: Document): ByteArray {

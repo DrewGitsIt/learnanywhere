@@ -173,11 +173,20 @@ mic (16 kHz, foreground service)
    ("O K") — cosmetic for the LLM; sherpa-onnx's online punctuation/casing
    model fixes display. **Accuracy comparator (Drew's suggestion)**: the
    same AAR ships an OfflineRecognizer that runs Whisper tiny/base and
-   Moonshine — wire one as a second pass over the finished utterance and
-   A/B it against the zipformer text before investing in a bigger
-   streaming model.
-4. **Conversation history** in `LearnAnywhereAgent` (multi-turn `contents`)
-   + **search grounding** flag with rendered citations.
+   Moonshine. **Status 2026-09-21: done** — Whisper tiny.en int8 second
+   pass, A/B shown in the Ask card. Verdict: whisper is much more
+   accurate → the ask now uses whisper's text (two-pass: zipformer =
+   live partials + fallback). The second-pass slot is model-agnostic —
+   swapping decoders is a config block + asset swap. Candidates if
+   tiny.en isn't enough: **Moonshine tiny/base** (27–61M, MIT, beats
+   whisper tiny/base — the right size-class comparator), whisper
+   base/small.en, **Parakeet-TDT 0.6B** (best open accuracy but ~600 MB
+   int8 and batch-only in sherpa-onnx — a "docked flagship" option, not
+   a everyday default).
+4. ~~Conversation history + search grounding~~ — **done 2026-09-21**:
+   multi-turn history (last 10 turns, "New chat" resets), google_search
+   tool on by default (Settings toggle), grounding citations rendered as
+   "Web sources" under the reply.
 5. **Voice loop v2**: streamed Gemini responses → sentence-chunked TTS,
    read-along highlight, barge-in.
 6. **"Read with me" mode** interleaving section reading and discussion.

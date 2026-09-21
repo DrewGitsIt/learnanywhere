@@ -55,7 +55,8 @@ class LearnAnywhereApp : Application() {
             api = { prefs.getString(KEY_GEMINI_API_KEY, "").orEmpty() },
             model = { prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL).orEmpty() },
             docs = { store.docs },
-            appCtx = this
+            appCtx = this,
+            webSearch = { prefs.getBoolean(KEY_WEB_SEARCH, true) }
         )
         ui = com.learnanywhere.ui.UiController(this)
 
@@ -164,6 +165,7 @@ class LearnAnywhereApp : Application() {
         const val KEY_GEMINI_MODEL = "gemini_model"
         const val KEY_TTS_RATE = "tts_rate_f"
         const val KEY_GROUNDING = "use_grounding"
+        const val KEY_WEB_SEARCH = "web_search"
         const val DEFAULT_MODEL = com.learnanywhere.agent.Gemini.DEFAULT_MODEL
 
         @Volatile

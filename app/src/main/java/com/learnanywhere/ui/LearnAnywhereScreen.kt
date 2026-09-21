@@ -170,7 +170,11 @@ private fun AskSection(ctl: UiController) {
     }
     Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Ask the agent", style = MaterialTheme.typography.titleLarge)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Ask the agent", style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f))
+                TextButton(onClick = { ctl.newChat() }) { Text("New chat") }
+            }
             OutlinedTextField(
                 value = q, onValueChange = { q = it },
                 label = { Text(if (voiceState == com.learnanywhere.speech.VoiceInput.State.LISTENING)
@@ -203,6 +207,7 @@ private fun AskSection(ctl: UiController) {
                         com.learnanywhere.speech.VoiceInput.State.IDLE -> "🎤 Speak"
                         com.learnanywhere.speech.VoiceInput.State.LOADING -> "⏳ Loading…"
                         com.learnanywhere.speech.VoiceInput.State.LISTENING -> "◼ Stop"
+                        com.learnanywhere.speech.VoiceInput.State.TRANSCRIBING -> "⏳ Transcribing…"
                     })
                 }
                 Button(onClick = { if (q.isNotBlank()) { ctl.ask(q); q = "" } },
@@ -236,9 +241,17 @@ private fun AskSection(ctl: UiController) {
                             Text("Referenced: **Figure ${r.citedFigure}**",
                                 style = MaterialTheme.typography.bodyMedium)
                         }
+                        if (r.sources.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            Text("Web sources:", style = MaterialTheme.typography.labelMedium)
+                            r.sources.take(5).forEach { s ->
+                                Text("• $s", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                         if (r.usage != null) {
                             Spacer(Modifier.height(4.dp))
-                            Text(r.usage, style = MaterialTheme.typography.labelMedium,
+                            Text(r.usage + " tokens", style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -317,6 +330,17 @@ private fun SettingsSection(ctl: UiController) {
                                 MaterialTheme.colorScheme.surface
                         ))
                 }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Web search:")
+                AssistChip(onClick = { ctl.toggleWebSearch(true) }, label = { Text("On") },
+                    colors = AssistChipDefaults.assistChipColors(containerColor =
+                        if (ctl.webSearch.value) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface))
+                AssistChip(onClick = { ctl.toggleWebSearch(false) }, label = { Text("Off") },
+                    colors = AssistChipDefaults.assistChipColors(containerColor =
+                        if (!ctl.webSearch.value) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Grounding:")

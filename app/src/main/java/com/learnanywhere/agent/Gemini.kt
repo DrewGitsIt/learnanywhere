@@ -51,7 +51,9 @@ class Gemini(
     data class Response(
         val text: String,
         val promptTokens: Int?,
-        val completionTokens: Int?
+        val completionTokens: Int?,
+        /** "title — uri" per grounding source when search grounding was used. */
+        val sources: List<String> = emptyList()
     )
 
     // ------------------------------------------------------------------
@@ -61,14 +63,16 @@ class Gemini(
         systemInstruction: String? = null,
         temperature: Float = 0.4f,
         topP: Float = 0.95f,
-        maxTokens: Int = 2048
+        maxTokens: Int = 2048,
+        enableSearch: Boolean = false
     ): Response {
         val body = GeminiBodyBuilder.generateContent(
             contents = contents.map { m -> m.toBody() },
             systemInstruction = systemInstruction,
             temperature = temperature,
             topP = topP,
-            maxOutputTokens = maxTokens
+            maxOutputTokens = maxTokens,
+            enableGoogleSearch = enableSearch
         )
         val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
                 (model().ifBlank { DEFAULT_MODEL }) + ":generateContent"
@@ -110,6 +114,7 @@ class Gemini(
         val o = org.json.JSONObject(json)
         val sb = StringBuilder()
         var finishReason: String? = null
+        val sources = ArrayList<String>()
         o.optJSONArray("candidates")?.let { cands ->
             if (cands.length() > 0) {
                 val c0 = cands.getJSONObject(0)
@@ -118,6 +123,17 @@ class Gemini(
                     for (i in 0 until parts.length()) {
                         val p = parts.getJSONObject(i)
                         if (!p.optBoolean("thought", false)) sb.append(p.optString("text"))
+                    }
+                }
+                // Search-grounding citations, when the tool was used.
+                c0.optJSONObject("groundingMetadata")?.optJSONArray("groundingChunks")?.let { gc ->
+                    for (i in 0 until gc.length()) {
+                        gc.getJSONObject(i).optJSONObject("web")?.let { w ->
+                            val title = w.optString("title")
+                            val uri = w.optString("uri")
+                            if (uri.isNotBlank())
+                                sources.add(if (title.isNotBlank()) "$title — $uri" else uri)
+                        }
                     }
                 }
             }
@@ -131,7 +147,8 @@ class Gemini(
         return Response(
             text,
             usage?.takeIf { it.has("promptTokenCount") }?.getInt("promptTokenCount"),
-            usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount")
+            usage?.takeIf { it.has("candidatesTokenCount") }?.getInt("candidatesTokenCount"),
+            sources
         )
     }
 
