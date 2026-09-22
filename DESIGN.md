@@ -370,3 +370,40 @@ Logic + App Check is the path if this ever ships).
   reach the user as one short spoken sentence plus an error line — never as
   fake model turns; model-supplied URLs are validated (https, public hosts,
   text/pdf only) before fetching, including after redirects. (2026-09-21)
+
+## 6. UX architecture (decided 2026-09-22)
+
+Five UX findings from live use, and the layout that answers them:
+
+1. **Home is a page, not a transient.** The main screen becomes a
+   `HorizontalPager`: page 0 is Home (hero + mic + one `+ Add` button +
+   library + recent sessions), pages 1..N are saved sessions, newest first.
+   The old "empty state" hero was only reachable while the library was empty;
+   now it *is* Home and is always one swipe away. Asking from Home starts a
+   new session and animates to its page.
+2. **One `+ Add` entry.** The three PDF/URL/Paste buttons collapse into a
+   single `+ Add` button opening a bottom sheet with the three options.
+3. **Swipe between sessions.** Settling on a session page resumes it
+   (thread restored to the UI, turns restored to the agent history). The
+   swipe-up sessions sheet remains as a fast jump list for long histories.
+4. **Karaoke read-along.** Every spoken utterance carries its text through
+   `PlaybackState` (`activeUtteranceId` + `activeText`). All long-form
+   speech — including read-with-me sections, previously one giant utterance —
+   is sentence-chunked, so the UI can highlight the sentence being spoken
+   (reading card, agent reply bubble, now-playing bar) and rate changes take
+   effect within a sentence instead of after a 90-second section. This is the
+   closed-captions/karaoke visual mirror the vision calls for (§1).
+5. **Figures ride along.** The reply schema gains `cited_page` (1-based page
+   of the cited document) so a cited figure is a *renderable page*, not a
+   string: reply bubbles show a tappable page thumbnail, and read-with-me maps
+   the current section to its page via per-page char offsets (computed lazily
+   from the stored PDF bytes, never persisted) and shows that page beside the
+   text. Android Auto gets the current page as MediaSession metadata art
+   (best-effort; needs a head-unit test).
+6. **Playback speed**: the chips always worked (verified by timing on-device:
+   17.1 s @ 1× → 12.8 s @ 1.5× for doc playback; 25.7 s @ 0.75× vs 15.9 s @
+   1.5× for read-with-me) but the rate was never persisted, could only be
+   changed while the bar was visible, and Piper pre-generates audio per
+   utterance so a giant-utterance section ignored changes for a minute. Fix =
+   persist the rate, add a Settings speed control, sentence-chunk everything.
+7. **Settings gets sections**: AI model / Tools / Voice & playback / Library.
