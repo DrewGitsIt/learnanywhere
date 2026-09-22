@@ -407,3 +407,49 @@ Five UX findings from live use, and the layout that answers them:
    utterance so a giant-utterance section ignored changes for a minute. Fix =
    persist the rate, add a Settings speed control, sentence-chunk everything.
 7. **Settings gets sections**: AI model / Tools / Voice & playback / Library.
+
+## 7. Answer quality, boilerplate skip, voice seek (decided 2026-09-22)
+
+Drew's second UX round, with his calls recorded:
+
+1. **Answer quality** (gap vs. ChatGPT/Gemini apps — all four dimensions:
+   depth, on-screen richness, doc grounding, pedagogy). Decision: **single
+   channel, but longer** — one `answer` field that is both spoken and shown;
+   no separate display text, no markdown (it is read by TTS). Levers:
+   - System-prompt rewrite: teaching persona (explain, build intuition,
+     define terms on first use, concrete numbers/details from the docs,
+     one-line takeaway after complex explanations); adaptive length — solid
+     paragraph by default (~4–8 sentences), deeper on request, short for
+     simple lookups; grounding directives (prefer specifics from attached
+     docs: exact figures, section names, reported metrics).
+   - Generation config: raise the answer budget (thinking tokens share
+     `maxOutputTokens` on Gemini 3.x — budget must cover both).
+   - Default model bumps to `gemini-3.8-flash` (verified 200 with this key;
+     the Settings chip still offers the others).
+   - Prompt stays byte-stable per §5 cache alignment; the rewrite is a
+     one-time cache invalidation.
+2. **Boilerplate in audiobook/read-with-me** (arXiv headers, copyright
+   blocks, references, footnotes). Decision: **auto-skip silently**, driven
+   by a **skip-map sidecar** — the stored document text is NEVER mutated
+   (§5 cache alignment). Classification: one Gemini call at add-time
+   labelling skippable regions by verbatim boundary quotes (located in the
+   stored text by canonical matching, same trick as PageMap), with **regex
+   heuristics as fallback** (References/Bibliography cutoff near the end,
+   arXiv front-matter, copyright lines) when offline/quota-limited — and
+   heuristics also sanity-bound the LLM output. Skip-maps apply to both
+   plain audiobook playback and read-with-me sectioning; Q&A grounding
+   still sees the full text.
+3. **Voice seek** ("drop me in the part about Bayesian last layers").
+   Decision: build it. The doc text is already in the cached prompt, so the
+   agent itself finds the spot: the response schema gains `seek_quote` — a
+   verbatim sentence from the attached document where the requested part
+   begins (plus `cited_document`); the app locates the quote in the stored
+   text via canonicalized matching, maps it to a read-with-me section, and
+   jumps there (starting read-with-me if idle). The spoken `answer` is a
+   short confirmation ("Jumping to the related-work section."). Misses
+   degrade gracefully: unlocatable quote → agent's answer is spoken as
+   usual, no jump.
+4. **Section offsets become first-class**: `Sections.split` grows a variant
+   returning each section's start offset in the source text (needed by both
+   the skip-map and seek), so skip filtering and quote→section mapping
+   share one geometry.
