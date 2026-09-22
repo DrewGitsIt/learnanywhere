@@ -1,11 +1,16 @@
 # LearnAnywhere — status
 
-## ⚠️ Pending: install 6264d70 on the phone
-The audit-hardening build (48/48 tests, byte-verified) is committed but the
-phone disconnected before `adb install`. When reconnected:
-`adb install -r app/build/outputs/apk/debug/app-debug.apk`, then one live
-tool-using ask (e.g. "Find the GPT-2 paper and add it to my library") to
-regression-check the per-round streaming reset and spoken tool cues.
+## Current: 3e50502 installed and live-verified (2026-09-21 evening)
+- **Crash fixed**: Drew's mid-reply crash was a native SIGSEGV — BargeInGuard's
+  loop gated on the shared job field, so rapid stop()/start() (streaming TTS
+  flaps playback per sentence) let two loops hit the same sherpa-onnx Vad
+  concurrently. Loop now obeys its own coroutine context; all native VAD calls
+  serialized behind vadLock. Two spoken multi-turn replies verified, no crash.
+- **Prompt-cache alignment verified live**: usage(stream) transcript lines show
+  prompt=17093 cached=14726 (86%) — including across an app restart, since
+  Gemini's implicit cache is server-side and the prefix is now byte-stable.
+- Audit-hardening build (6264d70) regression-checked in the same session:
+  streamed tool turns, citations (doc + figure chips), spoken replies.
 
 ## Own search tools 2026-09-21 (replaces dead google_search grounding)
 - `search_papers` (arXiv + Semantic Scholar, keyless) — live-verified: "Find
