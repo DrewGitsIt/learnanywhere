@@ -320,6 +320,10 @@ class Gemini(
                 throw GeminiError(0, "stream interrupted: ${e.message}")
             }
             TranscriptLog.log("response(stream)", sb.toString().take(2000))
+            // Streamed responses don't log raw JSON, so surface the usage
+            // here — cached= is how prompt-cache alignment is verified live.
+            TranscriptLog.log("usage(stream)",
+                "prompt=$promptTokens out=$completionTokens cached=$cachedTokens")
             if (sb.isBlank() && fcalls.isEmpty() && finishReason != null) {
                 throw GeminiError(200, "empty reply (finishReason=$finishReason)")
             }

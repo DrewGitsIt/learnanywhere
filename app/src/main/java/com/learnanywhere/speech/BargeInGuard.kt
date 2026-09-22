@@ -35,6 +35,16 @@ class BargeInGuard(
     private var vad: Vad? = null
     private var job: Job? = null
 
+    /**
+     * Serializes every native VAD call. Streaming TTS flaps playback state at
+     * each sentence boundary, so stop()/start() pairs arrive in quick
+     * succession — and cancellation is cooperative, so a dying loop can
+     * overlap its replacement by an iteration. Two threads inside
+     * Vad.acceptWaveform on the SAME native object is a use-after-free
+     * SIGSEGV (observed live 2026-09-21, crash in libsherpa-onnx-jni memcpy).
+     */
+    private val vadLock = Any()
+
     val running: Boolean get() = job?.isActive == true
 
     /** Caller must hold RECORD_AUDIO. Idempotent while running. */
@@ -48,7 +58,7 @@ class BargeInGuard(
         job = null
     }
 
-    private fun ensureVad(): Vad {
+    private fun ensureVad(): Vad = synchronized(vadLock) {
         vad?.let { it.clear(); return it }
         val config = VadModelConfig(
             sileroVadModelConfig = SileroVadModelConfig(
@@ -83,13 +93,19 @@ class BargeInGuard(
             }
             record.startRecording()
             val buf = ShortArray(512)   // one VAD window
-            while (scope.isActive && job?.isActive == true) {
+            // Check OUR OWN coroutine, never the shared job field: after a
+            // quick stop()/start() the field holds the REPLACEMENT job, and
+            // the old loop reading it would happily run forever alongside
+            // the new one.
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
                 val n = record.read(buf, 0, buf.size)
                 if (n <= 0) continue
                 val samples = FloatArray(n) { buf[it] / 32768f }
-                v.acceptWaveform(samples)
-                if (v.isSpeechDetected()) {
-                    v.clear()
+                val speech = synchronized(vadLock) {
+                    v.acceptWaveform(samples)
+                    v.isSpeechDetected().also { if (it) v.clear() }
+                }
+                if (speech) {
                     withContext(Dispatchers.Main) { onSpeech() }
                     break
                 }
