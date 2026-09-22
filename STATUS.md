@@ -1,6 +1,49 @@
 # LearnAnywhere — status
 
-## Current: c87fbe4 installed; visual verification blocked on device lock (2026-09-22)
+## Current: DESIGN §7 built and installed; live-verified except answer-depth eval (2026-09-22 morning)
+Second UX round (answer quality / silent boilerplate skip / voice seek), per
+DESIGN.md §7, built by three delegated agents + fixes, all merged, 144 JVM
+tests green, installed on-device (verify APK freshness — see gotcha below):
+- **Answer quality**: teaching-persona system prompt (intuition-first, terms
+  defined inline, concrete numbers from the docs, one-line takeaways,
+  adaptive length replacing the 2–4-sentence cap); ask calls now use
+  thinkingLevel medium + 8192-token budget; default model → gemini-3.8-flash.
+  One-time prompt-cache invalidation observed as expected (cached=null).
+- **Silent boilerplate skip**: sidecar skip-maps (stored text never mutated).
+  LLM classifier labels regions by verbatim boundary quotes at add-time
+  (warming at startup/add; failures are NOT persisted so a later start
+  retries); offline heuristics are floor and ceiling. KEY FINDING:
+  PdfText.extract emits ONE newline-free line, so line-anchored heuristics
+  never fire on PDFs — flowed passes added (refs list via heading-glued-to-
+  first-entry + citation-density walk for the END, so BERT's post-references
+  appendix survives; head rights-grant sentence-bounded, gated to newline-free
+  heads; ack anchored to a found refs list). Sidecar loads are unioned with
+  CURRENT heuristics (improvements reach already-classified docs; also patches
+  LLM quote ends clipped one punctuation char short by canonical matching).
+  Live: Attention read-with-me went 34 → 27 sections, section 1 opens at the
+  title, license/arXiv-stamp/ack/references silenced.
+- **Voice seek** (`seek_quote` in the reply schema → TextLocate → section
+  jump, pending-seek fires after the spoken confirmation): live-verified
+  mid-reading — "Drop me in the part about positional encoding" → spoke
+  "Jumping to the positional encoding section." → jumped section 1 → 13 of
+  27, page thumb 1 → 5 (correct page). Works idle and mid-reading; misses
+  degrade to a normal answer.
+- **Still unverified live**: answer-depth quality on a real substantive ask,
+  and the LLM classifier under the NEW heuristics union — both blocked by
+  Google-side 503 "high demand" on BOTH flash models plus daily-quota
+  exhaustion on 3.8-flash (RPD is per-model; testing burned 3.8's).
+  Model pref is explicitly gemini-3.6-flash for now (chip in Settings).
+- **Device state to restore** (phone dropped off USB first): Voice interrupt
+  (barge_in) still FALSE from deterministic testing — flip in Settings or
+  re-patch prefs; `svc power stayon` may still be set.
+- **Gotchas learned**: (1) a `./gradlew assembleDebug | tail -1` chain masked
+  a build that never produced a new APK — a stale binary got installed and
+  its lucky classifier 200 persisted LLM-only ranges; always check BUILD
+  SUCCESSFUL *and* the APK mtime before `adb install`. (2) barge-in still
+  self-triggers off the phone's own TTS (second sighting; mic transcribed
+  garbage into an ask mid-reading) — needs a VAD-threshold/AEC tuning pass.
+
+## Previous: c87fbe4 installed; visual verification completed morning 2026-09-22
 UX overhaul per DESIGN.md §6, built by three delegated agents (audio / data /
 UI) with exclusive file ownership, reviewed and merged:
 - **Home is pager page 0** (hero always reachable — fixes "empty state gone
