@@ -1,280 +1,148 @@
-# LearnAnywhere 🚗
+# LearnAnywhere
 
-> Your study companion for long drives. Upload the documents you want to learn
-> (PDFs, Wikipedia pages, pasted notes). Ask questions — the agent answers
-> grounded in those documents and names the figures it references. Then put it
-> in **"audiobook" mode** and have it read everything out loud, on-head-unit or
-> in the car.
+A hands-free Android study companion: build a library of documents, talk to it, and have it read them to you.
 
-**Target:** Android 14 · **UI:** Jetpack Compose · **AI:** Google Gemini (free
-tier, no credit card) · **TTS:** Android `TextToSpeech` (on-device, always
-free) · **In-car:** stable `MediaBrowserService` Android Auto bridge.
+Tired of staring at a paper, or typing prompts into a chat window just to
+understand one? LearnAnywhere lets you collect the documents you care about,
+ask about them out loud, and treat any of them as an audiobook. Good for a
+commute, for reading with a visual impairment, and for chasing down the
+references in a paper without losing your place.
 
-> **Where this is going:** the end state is a fully *vocal* interface (local,
-> private ASR in; spoken responses out; the screen mirrors the conversation).
-> See **DESIGN.md** for the vision, researched decisions (local ASR stack,
-> free-tier terms, voice-loop architecture), and roadmap. **STATUS.md** tracks
-> build state and known bugs.
+What works today:
 
----
+- **Ask by voice.** Speech recognition runs on the phone; answers come back
+  spoken. Speak while it's talking and it stops and listens (on-device VAD).
+- **A library you assemble.** Add a PDF, a URL, or pasted text. PDFs get their
+  text layer extracted and their pages rendered as figures.
+- **Grounded answers.** Replies cite the document, the figure, and the page —
+  and the cited page renders as a tappable thumbnail.
+- **Audiobook mode.** Any document, read end to end, with a speed control that
+  persists.
+- **Read-with-me.** Guided section-by-section reading with karaoke sentence
+  highlighting and the matching page beside the text; interrupt with a question
+  and reading resumes where it left off.
+- **Silent boilerplate skipping.** References, license blocks, arXiv stamps and
+  acknowledgements are skipped when reading aloud, via a skip-map sidecar (an
+  LLM pass at add time, regex heuristics as floor and ceiling). The stored text
+  is never mutated — Q&A still sees the whole document.
+- **Voice seek.** "Drop me in the part about positional encoding" jumps reading
+  to that section.
+- **It finds papers for you.** The agent can search arXiv and Semantic Scholar,
+  search the web (Tavily), and download a PDF straight into your library.
+- **Swipe** between Home and your saved sessions; **Android Auto** lists your
+  library as a media app.
+- **Free tier only.** Bring your own Gemini API key (no credit card); the
+  Tavily key for web search is optional.
 
-## 1. Why build, not point at an existing app?
+Honest scope: this is a personal project. Android 14+ only, it needs a free
+Gemini API key to do anything with the agent, and scanned image-only PDFs have
+no text layer, so they can be discussed but not read aloud.
 
-You asked for a free Android-14 app that, in one place:
+## Design
 
-| Requirement | LearnAnywhere | closest existing free apps |
-|---|---|---|
-| Choose which documents to upload (PDF, article, pasted text) | ✅ SAF + URL fetcher + paste | @Voice / Quickify: ✅ PDF, ⚠️ no free Gemini, ⚠️ no Android Auto |
-| Agent **facilitates discourse** in-document, cites passages | ✅ grounded in your docs, free Gemini | official Gemini app: ✅ discourse, ❌ can't ingest *your local* PDFs, no "audiobook of my docs" |
-| "Audiobook" of *any* content (papers, articles, agent responses) | ✅ on-device TTS of docs **and** agent replies | Speechify / NaturalReader: ✅ TTS, ⚠️ not for discourse, most pay for long listening |
-| **Android Auto** enabled so agent surfaces figures | ✅ MediaBrowserService bridge + phone "parked-mode" UI for figures/head-unit play | none found covering all four |
+### The gap
 
-No single free app covers the whole loop — so we build it. The two load-bearing
-facts that make the build *viable and free* are:
+Each half of this already exists, and neither half talks to the other.
 
-* **Gemini free tier** = no credit card, Flash models at ~10 RPM (daily quota
-  is volatile — check https://aistudio.google.com/rate-limit, don't hard-code
-  it). PDFs go **inline up to ~20 MB total request size**; larger files (up to
-  50 MB / 1,000 pages) need the also-free Files API. That's the whole "read my
-  paper → ask → name the figure" loop, with no paid API.
-  ⚠️ *Privacy:* outside the EEA/UK/Switzerland, free-tier prompts and attached
-  documents may be used to train Google's models and may be human-reviewed.
-  See DESIGN.md §privacy.
-* **Android 14** ships `android.speech.tts` with `UtteranceProgressListener`
-  (per-utterance play/pause/progress) and a modern `MediaBrowserService`
-  surface — so the in-car "media app" bridge is stable and doesn't depend on a
-  version-sensitive Car App Library skin.
+Audiobook and TTS apps read books, not *your* PDFs — and they have no idea what
+the paper says, so they can't answer a question about it. Notebook and RAG
+tools will answer questions about your documents, but they are a screen and a
+keyboard: not something you can use with your hands on a steering wheel. Voice
+assistants are hands-free but they ship your raw audio to a cloud provider and
+know nothing about your library.
 
----
+So the target is the intersection: **entirely vocal interaction**, grounded in
+documents *you* chose, with the screen acting as a mirror — the sentence being
+spoken, the figure being cited — for when you can glance at it. Two constraints
+shape every decision (DESIGN.md §1):
 
-## 2. What actually works right now (verified)
+1. **Free.** Free API tiers only, no paid keys, no subscriptions.
+2. **Voice privacy.** Raw microphone audio never leaves the device — not to
+   Google, not to anyone. Speech recognition and speech synthesis both run
+   locally. Document *text* is a separate and weaker constraint: it does go to
+   Gemini, and on the unpaid tier outside the EEA/UK/Switzerland Google may use
+   prompts and attached documents for training, with possible human review.
+   Fine for arXiv papers; use a paid key for anything sensitive.
 
-I ran the pure logic on a JVM/Python harness (see §5):
+That second constraint is why Gemini's free native-audio input is deliberately
+unused, and why speech is a local dependency rather than a cloud call.
 
-* ✅ **Gemini request body** is byte-for-byte the shape the free tier accepts —
-  `contents`, `inlineData` for PDF + `text/plain`, correct `systemInstruction`
-  and `generationConfig`, balanced JSON.
-* ✅ **URL → text** pipeline (Wikipedia / news / pasted article) correctly
-  strips `<script>` / `<style>`, decodes the common HTML entities, collapses
-  whitespace, and preserves the heading/body/list text you'd want spoken.
-* ✅ **Figure-candidate scoring** (a) correctly separates text pages (~5% non-white)
-  from figure pages (~70% non-white); threshold at 65% (verified on synthetic 48×48 bitmaps).
-* ✅ **Caption prompt** (a) is consistent and names the document & figure.
+### How it fits together
 
-## 3. What you'll verify on a device (device-only surfaces)
+```mermaid
+flowchart LR
+  subgraph device["On device — audio never leaves the phone"]
+    direction TB
+    mic["Mic"] --> vad["Silero VAD<br/>gate + barge-in"]
+    vad --> asr["sherpa-onnx ASR<br/>streaming zipformer partials<br/>+ whisper re-decode"]
+    tts["Piper neural TTS<br/>(system TTS fallback)"] --> out["Speaker + karaoke highlight"]
+    subgraph lib["Library"]
+      direction TB
+      src["PDF · URL · pasted text"] --> ext["pdfbox text + page figures<br/>skip-map · page map · sections"]
+      ext --> room[("Room + on-disk bytes")]
+    end
+  end
 
-These are Android/OS-bound and must be exercised on real Android 14 (or
-emulator). They're written cleanly but I did **not** compile-check them here —
-this box has no Android SDK:
+  subgraph cloud["Gemini free tier — text only"]
+    direction TB
+    agent["Agent loop<br/>structured JSON reply:<br/>answer + document/figure/page citation"]
+    tools["Tools<br/>search_papers (arXiv, Semantic Scholar)<br/>search_web (Tavily)<br/>download_document"]
+    agent <--> tools
+  end
 
-* SAF file-picker → PDF add flow.
-* On-device TTS playback (pause / next / speed).
-* The Android Auto "media app" discovery + Play/Pause bridging from the head
-  unit.
-* Compose screen scrolling / dialogs on the phone.
-
----
-
-## 4. How to build & run
-
-### Prereqs
-* Android 14 SDK (or newer) + build-tools ≥ 34
-* JDK 17
-* Android Studio *Flamingo* or newer (or any Gradle 8.x toolchain)
-* A free Gemini API key — `https://aistudio.google.com → Get API key`. No card.
-
-### Build
-```bash
-cd learnanywhere
-# If you don't already have a local SDK, set it:
-export ANDROID_HOME="$HOME/Android/Sdk"   # or wherever it lives
-
-# First build (downloads AGP 8.5.2, Kotlin 1.9.24, Compose, okio, ...)
-./gradlew :app:assembleDebug
-
-# Install to a connected device / emulator (Android 14):
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+  asr -- "question text" --> agent
+  room -- "grounding: document text + pages" --> agent
+  agent -- "answer, sentence by sentence" --> tts
+  room -- "audiobook / read-with-me" --> tts
+  tools -. "fetched PDFs" .-> src
 ```
 
-### Run the flow
-1. **Add documents.** `Add PDF` (pick any local PDF), `Add URL` (paste a
-   Wikipedia / news / arxiv URL), or `Paste` (title + text). Each row has a
-   checkbox — that's both the *grounding* set for the agent *and* the
-   *play-order* for the audiobook.
-2. **Ask.** Type a question → `Ask`. The agent replies grounded in your
-   documents, cites the source title, and names any figure it referenced. If
-   a figure is named, it's pulled from the doc's `Figure` list and rendered
-   inline (phone; in-car we show the name + audio).
-3. **Listen.** `▶ Play selected` reads the documents in order, using
-   `android.speech.tts`. Speed chips 0.75× – 1.5×. Pause / Prev / Next all
-   work from the phone **and** from the car via the MediaBridge.
-4. **Settings.** Paste the free Gemini key, pick the model
-   (`gemini-2.5-flash` / `gemini-2.5-pro`), toggle grounding on/off, and
-   `Test connection` to confirm the free tier is reachable.
+Notes on the pieces:
 
-### Android Auto
-* The app ships with a `MediaBrowserService`
-  (`com.learnanywhere.car.LearnStudyMediaService`, already declared with
-  `foregroundServiceType="mediaPlayback"`).
-* On Android Auto (Android 14), open **Media → add app** and select
-  **LearnStudy**. Your documents appear as media items; head-unit
-  Play/Pause/Next/Prev controls the same `AudiobookPlayer` instance the phone
-  binds to.
-* *Caveat (honest):* AA's media-app discovery is car-head-unit dependent. On
-  most head units it appears as any other Spotify/Google-Podcasts-style media
-  app. If a particular head unit doesn't list it under "add app," the
-  fallback — which still works on the phone at the wheel — is to leave the
-  phone's Play screen in view (it locks the UI and keeps audio playing).
+- **Speech in and out** are one dependency: the sherpa-onnx AAR provides Silero
+  VAD, a streaming zipformer for live partials, a whisper second pass for
+  accuracy, and the Piper voice. Models are fetched by a script, not committed.
+- **The agent loop** is hand-rolled against the Gemini REST API — no LangChain
+  class dependency in the APK. Replies come back as structured JSON so the
+  citation and the seek target are fields, not regex bait. The tool loop has a
+  hard iteration cap, returns tool failures to the model rather than throwing,
+  and validates any URL the model asks it to fetch.
+- **Requests are laid out for the free tier**: the prefix (system prompt,
+  grounding, history) stays byte-stable turn over turn so Gemini's implicit
+  cache hits, documents upload once via the Files API, and per-turn context
+  rides late in the request instead of in the system instruction.
+- **The library is the grounding set**, and the same extracted text feeds
+  playback directly — audiobook and read-with-me never touch the network.
 
----
+`DESIGN.md` is the source of truth for the reasoning and the decisions log;
+`STATUS.md` is the honest current state, including what is and isn't verified
+on a real device.
 
-## 5. Repo layout
+## Plans for the future
 
-```
-learnanywhere/
-├── build.gradle.kts          # AGP 8.5.2, Kotlin 1.9.24, Compose BOM
-├── settings.gradle.kts
-├── gradle.properties
-├── .gitignore
-└── app/
-    ├── build.gradle.kts      # deps: compose, coroutines, okhttp, coil-kt, media3-session
-    ├── proguard-rules.pro
-    └── src/main/
-        ├── AndroidManifest.xml
-        ├── res/ (values/strings.xml, values/themes.xml, xml/automotive_app_desc.xml,
-        │        drawable/ic_launcher_vehicle.xml)
-        └── java/com/learnanywhere/
-            ├── LearnAnywhereApp.kt          # Application; wires store, agent, shared player
-            ├── MainActivity.kt           # Compose host
-            ├── agent/
-            │   ├── Gemini.kt             # raw OkHttp REST client for the free tier
-            │   ├── LearnAnywhereAgent.kt    # orchestration: grounding + system prompt + captionFigure + reply parse
-            │   └── OkHttpClientFactory.kt
-            ├── audio/
-            │   └── AudiobookPlayer.kt    # android.speech.tts + UtteranceProgressListener;
-            │                              #   play/pause/next/prev/rate/sayOnce, StateFlow surface
-            ├── car/
-            │   └── LearnStudyMediaService.kt  # android:media.browse bridge; ask + figures + docs-as-media
-            ├── core/
-            │   ├── GeminiBodyBuilder.kt  # (pure) body shape + UrlText.stripHtml — unit-tested
-            │   ├── Figures.kt            # (pure) (a) feature: imageRatioScore + captionPrompt — unit-tested
-            │   └── Http.kt               # URL fetch (okhttp)
-            ├── data/
-            │   ├── Document.kt           # PDF|TEXT|URL + Figure (with caption + figure-candidate)
-            │   ├── PdfFigureExtractor.kt # PDF -> bitmap figures + per-page figure candidate score
-            │   └── DocumentStore.kt      # in-memory view + persistence callbacks
-            ├── app/db/                   # (b) Room persistence
-            │   ├── LearnAnywhereDb.kt       #  @Entity DocumentRow + @Dao + @Database
-            │   ├── AppPdfStore.kt        # on-disk PDF bytes + figure bitmaps
-            │   └── AppDatabase.kt        # Room builder + row→Document
-            ├── ui/
-            │   ├── UiController.kt       # single source of truth for the screen + car + (a) caption
-            │   └── LearnAnywhereScreen.kt   # Compose: Docs(±captions) / Ask / Listen / Settings
-        ├── main/ (above)
-        └── src/test/java/com/learnanywhere/LearnAnywherePureTest.kt
-```
+- **Continuous listening.** Voice input is push-to-talk today; VAD-gated
+  always-on listening needs a mic foreground service.
+- **Barge-in tuning.** It still occasionally triggers on the phone's own TTS —
+  a VAD-threshold and echo-cancellation pass, per device.
+- **Android Auto figure art** via MediaSession metadata, so the cited page
+  shows on the head unit. Deferred until it can be tested in a real car.
+- **Dual-channel replies** if the current single spoken-and-shown answer proves
+  too bare on screen — the decision was deliberately to try one channel first.
+- **A privacy-respecting fallback provider** (Groq's free tier does not train
+  on inputs), for documents that shouldn't go to the Gemini free tier.
+- **Vector-native figure extraction.** Figures are page-level renders scored by
+  a heuristic; real extraction needs a PDF-native pass. OCR for scanned PDFs
+  is the related gap.
+- **Interactions API migration** and a framework (Koog) if the agent outgrows a
+  hand-rolled loop — both intentionally deferred while the loop stays small.
 
----
+## Contributing
 
-## 6. The (a) / (b) / (c) features you asked for
+Open an issue to discuss what you have in mind, then send a PR.
 
-### (a) Real figures + on-demand captions
-* **At add time** every PDF page is rendered to a `Figure` (a PNG) *and* scored
-  for "figure-candidacy": a page is a figure-candidate when ≥ 65% of its sampled
-  pixels are non-white (text-heavy pages score ~5%). The UI shows each figure
-  with its heuristic caption (or "—").
-* **On demand** — tap **Caption** under any figure — the app sends the page
-  bitmap to Gemini (vision, free tier) with a strict prompt ("one short,
-  self-contained sentence; no page numbers") and caches the result. The agent
-  *cites* figure names in its replies, so "what's in Figure 3?" lands the right
-  bitmap on the Caption path.
-
-The core scoring (a) is pure: `com.learnanywhere.core.Figures.imageRatioScore()` +
-`captionPrompt()`. Unit-tested in `LearnAnywherePureTest`.
-
-### (b) Persistence across app restarts
-* **Room** (`com.learnanywhere.app.db`) holds one `DocumentRow` per document
-  (metadata only — title, source, provenance, text, order).
-* **`AppPdfStore`** (on-disk, `filesDir/pdfs/` + `filesDir/figs/`) holds the
-  heavy bytes: the PDF file itself and each rendered figure bitmap, keyed by
-  document id.
-* **`DocumentStore`** is the in-memory view. On cold start, `LearnAnywhereApp`
-  observes the Room flow, re-attaches figures from `AppPdfStore`, and
-  [DocumentStore.hydrate]s the in-memory map. The Compose UI observes the same
-  flow via `UiController.refreshFromStore()`, so the list is correct across
-  activity restarts and app cold starts.
-
-A `Document` deleted on the phone *or* in the car removes the row **and** the
-bytes, via `DocumentStore.onRemoved` + `AppPdfStore.deleteAll(id)`.
-
-### (c) Android Auto — a *real* in-car surface (not just audio)
-The in-car `MediaBrowserService` (`com.learnanywhere.car.LearnStudyMediaService`)
-exposes **three special items** plus one row per document:
-
-| media-id | what the head-unit shows | what happens when tapped |
-|---|---|---|
-| `learnanywhere://special/play-all` | ▶  Play audiobook (all docs) | plays the selected library |
-| `learnanywhere://special/ask` | 🤖  Ask the agent (voice reply) | speaks the latest agent reply |
-| `learnanywhere://special/figures` | 🖼  Figures (spoken) | reads each figure's title + caption aloud |
-| `learnanywhere://doc/<id>` | 📄  <doc title> | plays that one document |
-
-So in-car you can (1) listen to the whole library, (2) have the agent speak
-its latest answer, or (3) have it read the figure list — a *genuine* in-car
-study surface, not just a Spotify-style player. **And** in parked mode, the
-phone UI still shows the full visual agent + figures + Caption buttons. A richer
-Car App Library (CALS) skin is an optional follow-up (README §6, #3).
-
----
-
-## 7. Honest limitations & next steps (in priority order)
-
-Done in this pass:  (a) figure extraction + on-demand vision captions ·
-(b) Room + on-disk persistence across restarts · (c) a genuine in-car surface
-(play-all / ask / figures / per-doc) via `MediaBrowserService`.
-
-Remaining (priority order):
-1. ~~Offline PDF *text*~~ — **done (2026-09-21)**: `pdfbox-android` extracts
-   the text layer at add-time (`data/PdfText.kt`, with TTS-friendly re-flow:
-   de-hyphenation + line joining), and `LearnAnywhereApp.backfillPdfText`
-   upgrades PDFs added before the feature existed. Scanned/image-only PDFs
-   still have no text and stay silent in audiobook mode (Gemini Q&A still
-   works on them).
-2. **Real paper-figure paths**: we score pages for figure-candidacy and caption
-   them via Gemini vision (verified). For *vector* figure extraction with true
-   captions, add a PDF-native library (`pdfbox-android`) and replace the
-   scorer. Nice-to-have.
-3. **Car App Library (CALS) skin**: the `MediaBrowserService` surface is the
-   reliable in-car path and now carries ask + figures. A richer CALS skin
-   (custom in-car list UI) is the follow-up — I omitted it because the
-   `androidx.car.app` API moved between 1.3 and 1.5. ~200–400 LOC.
-4. **Free-tier privacy**: confirmed (2026-09-20) — Google's unpaid tier *does*
-   use prompts and attached documents for model improvement, with possible
-   human review (EEA/UK/CH excepted). Fine for open papers; for NDA /
-   unpublished work use a paid key or the Groq path. Details in DESIGN.md §3.3.
-5. **Room schema migrations**: v1 ships with `exportSchema = false` and
-   `fallbackToDestructiveMigration()`. Before shipping, add a proper v1→v2
-   path + `schemas/` export.
-
----
-
-## 8. Testing that's already runnable *today* (no Android required)
-
-The pure core ships with a JVM test
-(`app/src/test/java/com/learnanywhere/LearnAnywherePureTest.kt`). On a machine with
-JDK 17 + Gradle:
-
-```
-./gradlew :app:testDebugUnitTest
-```
-
-That exercises the request-body builder and the URL→text pipeline. The two
-standalone harnesses I used to verify here during the build are
-`/tmp/verify_pure.py` (URL strip) and `/tmp/verify_body2.py` (Gemini body
-shape) — both pass.
-
----
-
-## 9. License
-
-MIT (or whatever you prefer — it's your app). Built to keep the surface
-small enough to read in one sitting.
+To build you need the Android 14 SDK (compileSdk 34, minSdk 34) and JDK 17.
+The speech binaries — sherpa-onnx AAR, ASR models, Silero VAD, the Piper voice
+— are gitignored, so run `scripts/fetch_speech_assets.sh` once after cloning,
+then `./gradlew :app:assembleDebug`. `./gradlew :app:testDebugUnitTest` runs
+the JVM tests and needs no device. A free Gemini API key goes in Settings
+(Tavily's is optional, for web search).
