@@ -14,3 +14,4 @@
 /app/src/main/assets/asr/
 /app/src/main/assets/tts/
 .claude/worktrees/
+*.hprof
