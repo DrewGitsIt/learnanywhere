@@ -228,8 +228,9 @@ class DocumentStore(
         return skipLock.withLock {
             skipRanges[id]?.let { return@withLock it }
             skipStore?.load(id)?.let { saved ->
-                skipRanges[id] = saved
-                return@withLock saved
+                val merged = withCurrentHeuristics(id, saved)
+                skipRanges[id] = merged
+                return@withLock merged
             }
             val classifier = boilerplateClassifier
             var durable = true
@@ -268,8 +269,28 @@ class DocumentStore(
     fun cachedSkipRanges(id: String): List<IntRange> {
         skipRanges[id]?.let { return it }
         val saved = skipStore?.load(id) ?: return emptyList()
-        skipRanges[id] = saved
-        return saved
+        val merged = withCurrentHeuristics(id, saved)
+        skipRanges[id] = merged
+        return merged
+    }
+
+    /**
+     * A persisted skip-map unioned with TODAY's offline heuristics. The
+     * sidecar captures what the classifier knew when it ran; the heuristics
+     * improve across app versions (e.g. the flowed-text passes) and cost
+     * microseconds, so sidecar loads always get their floor re-applied —
+     * this also patches LLM quote boundaries that canonical matching clipped
+     * one punctuation char short.
+     */
+    private fun withCurrentHeuristics(id: String, saved: List<IntRange>): List<IntRange> {
+        val text = _docs[id]?.text ?: return saved
+        if (text.isBlank()) return saved
+        return try {
+            com.learnanywhere.core.Ranges.normalize(
+                saved + com.learnanywhere.core.Boilerplate.heuristicRanges(text), text.length)
+        } catch (t: Throwable) {
+            saved
+        }
     }
 
     fun byId(id: String): Document? = _docs[id]
