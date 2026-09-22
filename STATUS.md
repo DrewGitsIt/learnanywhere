@@ -1,6 +1,31 @@
 # LearnAnywhere — status
 
-## Current: 3e50502 installed and live-verified (2026-09-21 evening)
+## Current: c87fbe4 installed; visual verification blocked on device lock (2026-09-22)
+UX overhaul per DESIGN.md §6, built by three delegated agents (audio / data /
+UI) with exclusive file ownership, reviewed and merged:
+- **Home is pager page 0** (hero always reachable — fixes "empty state gone
+  forever"); pages 1..N are sessions, swipe to resume, stable page order.
+- **One `+ Add` sheet** replaces the PDF/URL/Paste triple.
+- **Karaoke read-along**: every utterance publishes its full text
+  (`PlaybackState.activeText`); replies and read-with-me highlight the spoken
+  sentence; read-with-me sections are sentence-chained (`sayChain`), so rate
+  changes land within a sentence and auto-advance rides the chain's onDone.
+- **Figures**: replies carry `cited_page` (schema + Room v3 migration —
+  verified on-device: user_version=3, docs intact); reply bubbles and the
+  reading card show the page render, tap to enlarge.
+- **Settings sectioned** (AI model / Tools / Voice & playback) with an
+  idle-accessible speed control; **rate now persists** (was never written).
+- Speed itself was never broken — on-device timing: 17.1 s @ 1× vs 12.8 s
+  @ 1.5× (doc playback), 25.7 s @ 0.75× vs 15.9 s @ 1.5× (read-with-me).
+- 89 JVM tests green. Device checks still pending (phone auto-locked):
+  pager feel, karaoke sync, auto-advance-once, figures on a real ask,
+  speed persistence across relaunch, Add sheet paths, IME insets.
+- A throwaway "Speed test" pasted doc from the timing experiment is still in
+  the library — remove via its row menu.
+- Android Auto figure display (metadata art) deliberately deferred: needs a
+  MediaSession + head-unit test.
+
+## Previous: 3e50502 installed and live-verified (2026-09-21 evening)
 - **Crash fixed**: Drew's mid-reply crash was a native SIGSEGV — BargeInGuard's
   loop gated on the shared job field, so rapid stop()/start() (streaming TTS
   flaps playback per sentence) let two loops hit the same sherpa-onnx Vad
