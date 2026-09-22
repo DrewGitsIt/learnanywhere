@@ -35,7 +35,9 @@ class LearnAnywhereAgent(
         val citedDocId: String?,
         val citedFigure: String?,
         val usage: String?,
-        val sources: List<String> = emptyList()
+        val sources: List<String> = emptyList(),
+        /** 1-based page of [citedDocId] holding the cited figure/table, if any. */
+        val citedPage: Int? = null
     )
 
     /**
@@ -282,7 +284,7 @@ class LearnAnywhereAgent(
                 val usage = if (reply.promptTokens != null || reply.completionTokens != null)
                     "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" +
                             (reply.cachedTokens?.let { " cached=$it" } ?: "") else null
-                AgentReply(answer, citedDoc, fig, usage, reply.sources)
+                AgentReply(answer, citedDoc, fig, usage, reply.sources, parsed?.citedPage)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             }
@@ -353,7 +355,9 @@ class LearnAnywhereAgent(
         appendLine("- Reply as JSON matching the response schema: `answer` is your reply;")
         appendLine("  `cited_document` is the exact title of the attached document the answer")
         appendLine("  rests on (omit when none); `cited_figure` names the figure or table it")
-        appendLine("  rests on (omit when none).")
+        appendLine("  rests on (omit when none); `cited_page` is the 1-based page of that")
+        appendLine("  document where the figure or table appears — always include it when")
+        appendLine("  you name one, so the page can be shown beside the answer.")
         appendLine("- The answer is spoken aloud by text-to-speech: plain conversational")
         appendLine("  prose. No markdown, no bullet lists, no headings, never read URLs")
         appendLine("  aloud. 2–4 sentences unless the user asks for detail.")
@@ -409,14 +413,20 @@ class LearnAnywhereAgent(
         internal const val RESPONSE_SCHEMA = """{"type":"object","properties":{""" +
                 """"answer":{"type":"string","description":"The reply, written to be spoken aloud"},""" +
                 """"cited_document":{"type":"string","description":"Exact title of the attached source document, if any"},""" +
-                """"cited_figure":{"type":"string","description":"Figure or table the answer rests on, if any"}},""" +
+                """"cited_figure":{"type":"string","description":"Figure or table the answer rests on, if any"},""" +
+                """"cited_page":{"type":"integer","description":"1-based page number in the cited document where the referenced figure or table appears"}},""" +
                 """"required":["answer"]}"""
     }
 }
 
 /** Pure parser for the structured [LearnAnywhereAgent.RESPONSE_SCHEMA] replies. */
 object ReplyJson {
-    data class Parsed(val answer: String, val citedDocument: String?, val citedFigure: String?)
+    data class Parsed(
+        val answer: String,
+        val citedDocument: String?,
+        val citedFigure: String?,
+        val citedPage: Int? = null
+    )
 
     /** Null when the text isn't the expected JSON (caller falls back to raw text). */
     fun parse(text: String): Parsed? = try {
@@ -424,7 +434,9 @@ object ReplyJson {
         Parsed(
             o.getString("answer"),
             o.optString("cited_document").ifBlank { null },
-            o.optString("cited_figure").ifBlank { null }
+            o.optString("cited_figure").ifBlank { null },
+            // Absent, 0, or non-numeric all mean "no page" — pages are 1-based.
+            o.optInt("cited_page", 0).takeIf { it > 0 }
         )
     } catch (_: Throwable) {
         null

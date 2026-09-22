@@ -3,6 +3,7 @@ package com.learnanywhere.data
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 /**
@@ -30,6 +31,16 @@ class DocumentStore(
     var onPdfAdded: ((Document) -> Unit)? = null
     var onTextOrUrlAdded: ((Document) -> Unit)? = null
     var onRemoved: ((String) -> Unit)? = null
+
+    /**
+     * Set at startup by [LearnAnywhereApp]: doc id -> per-page text, read back
+     * from the stored PDF bytes. Lives here rather than on [Document] because
+     * page offsets are derived data — never persisted, recomputed on demand.
+     */
+    var pagedTextProvider: (suspend (String) -> PdfText.Paged?)? = null
+
+    private val pagedText = java.util.concurrent.ConcurrentHashMap<String, PdfText.Paged>()
+    private val pagedTextLock = kotlinx.coroutines.sync.Mutex()
 
     // ------------------------------------------------------------------
     // Add
@@ -142,7 +153,41 @@ class DocumentStore(
 
     fun remove(id: String) {
         _docs.remove(id)
+        pagedText.remove(id)
         onRemoved?.invoke(id)
+    }
+
+    // ------------------------------------------------------------------
+    // Page mapping (DESIGN §6.5)
+    // ------------------------------------------------------------------
+
+    /**
+     * Per-page text for a PDF, memoized for the process lifetime. Null for
+     * non-PDF docs, when no provider is wired, or when the PDF has no text
+     * layer. Never throws — a missing page render must not break an ask.
+     *
+     * A text-less result is memoized too: re-parsing a scanned 100-page PDF on
+     * every read-along section is the jank this cache exists to prevent. A
+     * provider *failure* (I/O) is not cached, so it retries.
+     */
+    suspend fun pagedTextFor(id: String): PdfText.Paged? {
+        val doc = _docs[id] ?: return null
+        if (doc.source != Document.Source.PDF) return null
+        pagedText[id]?.let { return it.takeIf { p -> p.pageOffsets.isNotEmpty() } }
+        val provider = pagedTextProvider ?: return null
+        // One extraction at a time: the reply citation and the read-along
+        // cursor ask for the same document at the same moment.
+        return pagedTextLock.withLock {
+            pagedText[id]?.let { return@withLock it.takeIf { p -> p.pageOffsets.isNotEmpty() } }
+            val paged = try {
+                provider(id)
+            } catch (t: Throwable) {
+                Log.w(TAG, "paged text extraction failed for $id", t)
+                null
+            } ?: return@withLock null
+            pagedText[id] = paged
+            paged.takeIf { it.pageOffsets.isNotEmpty() }
+        }
     }
 
     fun byId(id: String): Document? = _docs[id]
@@ -156,6 +201,7 @@ class DocumentStore(
     internal fun hydrate(docs: List<Document>) {
         _docs.clear()
         docs.forEach { _docs[it.id] = it }
+        pagedText.keys.retainAll(_docs.keys)
     }
 
     // ------------------------------------------------------------------

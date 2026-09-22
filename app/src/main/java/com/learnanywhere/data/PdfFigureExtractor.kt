@@ -76,7 +76,9 @@ object PdfFigureExtractor {
                 out.add(
                     PageFigure(
                         index = i,
-                        title = "Figure ${i + 1}",
+                        // "Page N", matching cold-start rehydration: these are
+                        // page renders, and the index is the page number.
+                        title = "Page ${i + 1}",
                         mimeType = "image/png",
                         bytes = png.toByteArray(),
                         isFigureCandidate = isFig

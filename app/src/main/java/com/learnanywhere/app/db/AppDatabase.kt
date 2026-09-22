@@ -14,7 +14,7 @@ class AppDatabase(private val context: Context) {
         context,
         LearnAnywhereDatabase::class.java,
         "learnanywhere.db"
-    ).addMigrations(MIGRATION_1_2).build()
+    ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     // No fallbackToDestructiveMigration: a botched migration must fail loudly,
     // not silently wipe the user's library.
 
@@ -33,6 +33,13 @@ class AppDatabase(private val context: Context) {
                             "`role` TEXT NOT NULL, `text` TEXT NOT NULL, " +
                             "`cited_doc_title` TEXT, `cited_figure` TEXT, `sources` TEXT, " +
                             "`created_at` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            }
+        }
+
+        /** v2 → v3: a cited figure is a renderable page (DESIGN §6.5). */
+        val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN cited_page INTEGER")
             }
         }
     }

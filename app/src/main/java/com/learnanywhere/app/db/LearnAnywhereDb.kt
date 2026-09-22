@@ -63,6 +63,8 @@ data class MessageRow(
     /** Title (not id) — documents can be deleted independently of chats. */
     @ColumnInfo(name = "cited_doc_title") val citedDocTitle: String?,
     @ColumnInfo(name = "cited_figure") val citedFigure: String?,
+    /** 1-based page of the cited document the figure is on — the renderable half. */
+    @ColumnInfo(name = "cited_page") val citedPage: Int? = null,
     @ColumnInfo val sources: String?,                    // newline-joined
     @ColumnInfo(name = "created_at") val createdAt: Long
 )
@@ -90,7 +92,7 @@ interface ConversationDao {
 
 @Database(
     entities = [DocumentRow::class, ConversationRow::class, MessageRow::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class LearnAnywhereDatabase : androidx.room.RoomDatabase() {
