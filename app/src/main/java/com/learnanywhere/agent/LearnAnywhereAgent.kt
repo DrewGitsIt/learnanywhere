@@ -37,7 +37,13 @@ class LearnAnywhereAgent(
         val usage: String?,
         val sources: List<String> = emptyList(),
         /** 1-based page of [citedDocId] holding the cited figure/table, if any. */
-        val citedPage: Int? = null
+        val citedPage: Int? = null,
+        /**
+         * Voice seek (DESIGN §7.3): verbatim sentence from the cited document
+         * where the part the user asked to jump to begins. Null unless the
+         * user asked to navigate; an unlocatable quote degrades to no jump.
+         */
+        val seekQuote: String? = null
     )
 
     /**
@@ -144,7 +150,9 @@ class LearnAnywhereAgent(
                             client.generateTextStreamed(
                                 contents = contents,
                                 systemInstruction = sys,
+                                maxTokens = ANSWER_MAX_TOKENS,
                                 enableSearch = searchNow,
+                                thinkingLevel = ANSWER_THINKING_LEVEL,
                                 responseSchemaJson = schema,
                                 functionDeclarationsJson = decls,
                                 onDelta = onAnswerDelta)
@@ -152,14 +160,19 @@ class LearnAnywhereAgent(
                             // Mid-stream drop (code 0): finish non-streamed.
                             if (e.code == 0) client.generateText(
                                 contents = contents, systemInstruction = sys,
-                                enableSearch = searchNow, responseSchemaJson = schema,
+                                maxTokens = ANSWER_MAX_TOKENS,
+                                enableSearch = searchNow,
+                                thinkingLevel = ANSWER_THINKING_LEVEL,
+                                responseSchemaJson = schema,
                                 functionDeclarationsJson = decls)
                             else throw e
                         }
                     } else client.generateText(
                         contents = contents,
                         systemInstruction = sys,
+                        maxTokens = ANSWER_MAX_TOKENS,
                         enableSearch = searchNow,
+                        thinkingLevel = ANSWER_THINKING_LEVEL,
                         responseSchemaJson = schema,
                         functionDeclarationsJson = decls
                     )
@@ -284,7 +297,8 @@ class LearnAnywhereAgent(
                 val usage = if (reply.promptTokens != null || reply.completionTokens != null)
                     "in=${reply.promptTokens ?: "?"} out=${reply.completionTokens ?: "?"}" +
                             (reply.cachedTokens?.let { " cached=$it" } ?: "") else null
-                AgentReply(answer, citedDoc, fig, usage, reply.sources, parsed?.citedPage)
+                AgentReply(answer, citedDoc, fig, usage, reply.sources,
+                    parsed?.citedPage, parsed?.seekQuote)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             }
@@ -341,47 +355,8 @@ class LearnAnywhereAgent(
 
     // ------------------------------------------------------------------
 
-    private fun systemPrompt(searchOn: Boolean): String = buildString {
-        appendLine("# Role")
-        appendLine("You are LearnAnywhere, a hands-free study companion. The user is often")
-        appendLine("listening while driving or otherwise occupied, not reading a screen.")
-        appendLine()
-        appendLine("# Context")
-        appendLine("The user's selected library documents are attached to this conversation.")
-        appendLine("Questions may come from speech recognition and can contain transcription")
-        appendLine("errors — interpret them charitably.")
-        appendLine()
-        appendLine("# Output rules")
-        appendLine("- Reply as JSON matching the response schema: `answer` is your reply;")
-        appendLine("  `cited_document` is the exact title of the attached document the answer")
-        appendLine("  rests on (omit when none); `cited_figure` names the figure or table it")
-        appendLine("  rests on (omit when none); `cited_page` is the 1-based page of that")
-        appendLine("  document where the figure or table appears — always include it when")
-        appendLine("  you name one, so the page can be shown beside the answer.")
-        appendLine("- The answer is spoken aloud by text-to-speech: plain conversational")
-        appendLine("  prose. No markdown, no bullet lists, no headings, never read URLs")
-        appendLine("  aloud. 2–4 sentences unless the user asks for detail.")
-        appendLine("- If the answer is not in the attached documents, say so briefly, then")
-        appendLine("  answer from general knowledge" +
-                (if (searchOn) " or web search." else "."))
-        if (searchOn || tools != null) {
-            appendLine()
-            appendLine("# Tools")
-            if (searchOn) {
-                appendLine("Use Google Search for ancillary or current information; prefer the")
-                appendLine("attached documents for questions about their content.")
-            }
-            if (tools != null) {
-                appendLine("When the user asks you to find or fetch a paper: search_papers,")
-                appendLine("pick the best match (prefer one with pdf_url), check list_library")
-                appendLine("for duplicates, then download_document with that pdf_url. If")
-                appendLine("search_papers finds nothing, retry once with different terms")
-                appendLine("before giving up. For current events or general facts not in the")
-                appendLine("attached documents, use search_web if it is available. Confirm out")
-                appendLine("loud what was added and whether it can be read aloud.")
-            }
-        }
-    }
+    private fun systemPrompt(searchOn: Boolean): String =
+        buildSystemPrompt(searchOn, toolsOn = tools != null)
 
     private fun mimeFor(d: Document) = when (d.source) {
         Document.Source.TEXT  -> "text/plain"
@@ -409,12 +384,24 @@ class LearnAnywhereAgent(
         /** Hard cap on tool-loop rounds (best practice: 5–10 for a small agent). */
         private const val MAX_TOOL_ITERATIONS = 5
 
+        /**
+         * Answer budget for the [ask] tool loop (DESIGN §7.1). On Gemini 3.x
+         * thinking tokens are drawn from `maxOutputTokens`, so this has to
+         * cover medium thinking AND a multi-paragraph spoken answer. Ping and
+         * figure captions keep their own small budgets.
+         */
+        private const val ANSWER_MAX_TOKENS = 8192
+
+        /** Medium thinking: answer quality is worth the extra latency here. */
+        private const val ANSWER_THINKING_LEVEL = "medium"
+
         /** Structured-output schema for [ask] replies (Gemini 3 allows this with tools). */
         internal const val RESPONSE_SCHEMA = """{"type":"object","properties":{""" +
                 """"answer":{"type":"string","description":"The reply, written to be spoken aloud"},""" +
                 """"cited_document":{"type":"string","description":"Exact title of the attached source document, if any"},""" +
                 """"cited_figure":{"type":"string","description":"Figure or table the answer rests on, if any"},""" +
-                """"cited_page":{"type":"integer","description":"1-based page number in the cited document where the referenced figure or table appears"}},""" +
+                """"cited_page":{"type":"integer","description":"1-based page number in the cited document where the referenced figure or table appears"},""" +
+                """"seek_quote":{"type":"string","description":"Verbatim sentence from the attached document where the requested part begins — only when the user asks to jump to / hear a specific part of a document"}},""" +
                 """"required":["answer"]}"""
     }
 }
@@ -425,7 +412,9 @@ object ReplyJson {
         val answer: String,
         val citedDocument: String?,
         val citedFigure: String?,
-        val citedPage: Int? = null
+        val citedPage: Int? = null,
+        /** Verbatim sentence to seek to; null unless the user asked to navigate. */
+        val seekQuote: String? = null
     )
 
     /** Null when the text isn't the expected JSON (caller falls back to raw text). */
@@ -436,9 +425,98 @@ object ReplyJson {
             o.optString("cited_document").ifBlank { null },
             o.optString("cited_figure").ifBlank { null },
             // Absent, 0, or non-numeric all mean "no page" — pages are 1-based.
-            o.optInt("cited_page", 0).takeIf { it > 0 }
+            o.optInt("cited_page", 0).takeIf { it > 0 },
+            // Absent or whitespace-only both mean "no jump requested".
+            o.optString("seek_quote").takeIf { it.isNotBlank() }
         )
     } catch (_: Throwable) {
         null
+    }
+}
+
+/**
+ * The voice-aware system instruction (DESIGN §7.1), as a pure function of
+ * [searchOn] and [toolsOn] — no timestamps, no randomness, no reading of
+ * mutable state — so the request prefix stays byte-stable turn over turn for
+ * Gemini's implicit cache (§5). Editing this text is a one-time cache
+ * invalidation, which is expected and fine.
+ *
+ * Top-level and `internal` so it is testable on the JVM without an Android
+ * Context.
+ */
+internal fun buildSystemPrompt(searchOn: Boolean, toolsOn: Boolean): String = buildString {
+    appendLine("# Role")
+    appendLine("You are LearnAnywhere, a hands-free study companion. The user is often")
+    appendLine("listening while driving or otherwise occupied, not reading a screen.")
+    appendLine()
+    appendLine("# Context")
+    appendLine("The user's selected library documents are attached to this conversation.")
+    appendLine("Questions may come from speech recognition and can contain transcription")
+    appendLine("errors — interpret them charitably.")
+    appendLine()
+    appendLine("# How to teach")
+    appendLine("Answer like an excellent teacher talking with a curious colleague, not")
+    appendLine("like a search result. Build intuition first — say what the idea is for")
+    appendLine("and why it matters — then give the mechanism. Define every technical")
+    appendLine("term the first time you use it, in a short clause, without breaking the")
+    appendLine("flow. Ground the explanation in concrete specifics from the attached")
+    appendLine("documents: exact numbers, reported metrics, dataset and model names,")
+    appendLine("and the section or figure the claim comes from. When an explanation is")
+    appendLine("complex, close it with a single-sentence takeaway the user can carry")
+    appendLine("away. Prefer what the documents actually say over generic textbook")
+    appendLine("framing; if a claim rests on a document, make the answer reflect that")
+    appendLine("document's specifics rather than what papers of that kind usually say.")
+    appendLine()
+    appendLine("# Length")
+    appendLine("Adapt to the question. By default give a solid, substantive paragraph —")
+    appendLine("roughly four to eight sentences — that actually explains rather than")
+    appendLine("gestures. Go genuinely deep when the user asks for detail, for a walk")
+    appendLine("through something, or for more: several paragraphs' worth of spoken")
+    appendLine("explanation is welcome there. Keep it to a sentence or two for simple")
+    appendLine("lookups, confirmations, and yes/no questions — padding a short answer")
+    appendLine("is as bad as truncating a deep one.")
+    appendLine()
+    appendLine("# Output rules")
+    appendLine("- Reply as JSON matching the response schema: `answer` is your reply;")
+    appendLine("  `cited_document` is the exact title of the attached document the answer")
+    appendLine("  rests on (omit when none); `cited_figure` names the figure or table it")
+    appendLine("  rests on (omit when none); `cited_page` is the 1-based page of that")
+    appendLine("  document where the figure or table appears — always include it when")
+    appendLine("  you name one, so the page can be shown beside the answer.")
+    appendLine("- The answer is spoken aloud by text-to-speech: plain conversational")
+    appendLine("  prose. No markdown, no bullet lists, no headings, no numbered lists,")
+    appendLine("  never read URLs aloud. Write out what a bullet list would have said")
+    appendLine("  as flowing sentences.")
+    appendLine("- If the answer is not in the attached documents, say so briefly, then")
+    appendLine("  answer from general knowledge" +
+            (if (searchOn) " or web search." else "."))
+    appendLine()
+    appendLine("# Jumping to part of a document")
+    appendLine("When the user asks to be taken to, dropped into, or read a particular")
+    appendLine("part of an attached document — a section, a topic, \"the part about X\" —")
+    appendLine("set `seek_quote` to a verbatim sentence, copied exactly from that")
+    appendLine("document and at least about ten words long, where the requested part")
+    appendLine("begins; set `cited_document` to that document's exact title; and make")
+    appendLine("`answer` a brief spoken confirmation such as \"Jumping to the")
+    appendLine("related-work section.\" Copy the sentence character for character — do")
+    appendLine("not paraphrase, summarize, or stitch fragments together, or the app")
+    appendLine("cannot find the spot. When the user is not asking to navigate, omit")
+    appendLine("`seek_quote` entirely.")
+    if (searchOn || toolsOn) {
+        appendLine()
+        appendLine("# Tools")
+        if (searchOn) {
+            appendLine("Use Google Search for ancillary or current information; prefer the")
+            appendLine("attached documents for questions about their content.")
+        }
+        if (toolsOn) {
+            appendLine("When the user asks you to find or fetch a paper: search_papers,")
+            appendLine("pick the best match (prefer one with pdf_url), check list_library")
+            appendLine("for duplicates, then download_document with that pdf_url. If")
+            appendLine("search_papers finds nothing, retry once with different terms")
+            appendLine("before giving up. For current events or general facts not in the")
+            appendLine("attached documents, use search_web if it is available. Confirm out")
+            appendLine("loud what was added and whether it can be read aloud.")
+        }
     }
 }

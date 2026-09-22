@@ -412,7 +412,7 @@ class Gemini(
     companion object {
         // gemini-2.5-flash 404s for new API keys ("no longer available to new
         // users", verified 2026-09-21); Google's error recommends 3.6-flash.
-        const val DEFAULT_MODEL = "gemini-3.6-flash"
+        const val DEFAULT_MODEL = "gemini-3.8-flash"
         private const val MAX_ATTEMPTS = 3
     }
 }
