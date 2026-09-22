@@ -60,7 +60,84 @@ object Boilerplate {
         // (d) Acknowledgments: the heading plus its (short) body.
         ackRange(text, lines)?.let { found.add(it) }
 
+        // (e)–(g) Flowed-text passes: PdfText.extract re-flows a PDF into ONE
+        // newline-free line (observed live 2026-09-22, "Attention" = 39k chars,
+        // zero '\n'), so every line-anchored pattern above is structurally
+        // blind on the app's primary content type. These patterns carry their
+        // own anchors instead of borrowing the line's.
+        flowedRanges(text, found)
+
         return Ranges.normalize(found, n)
+    }
+
+    /**
+     * Skip ranges that need no line structure. Same conservatism contract:
+     * each pattern must be unmistakable on its own, because there is no
+     * "short line" bound left to lean on.
+     */
+    private fun flowedRanges(text: String, found: MutableList<IntRange>) {
+        val n = text.length
+
+        // (e) The references list. Start: the heading glued to its first
+        //     entry — "References [1] …" (bracket style) or "References Kevin
+        //     Clark, … 2018." (author-year style) — in the tail half only,
+        //     last match wins. End: a citation-density walk, because papers
+        //     put appendices AFTER the references (BERT's runs 12k chars and
+        //     is followed by a real appendix) — windows keep skipping while
+        //     they stay dense with year/bracket citation marks. A candidate
+        //     whose FIRST window is sparse is prose that merely said
+        //     "References", and skips nothing.
+        val tailFrom = (n * FLOWED_TAIL_FRACTION).toInt()
+        val refs = REFS_FLOWED.findAll(text).lastOrNull { it.range.first >= tailFrom }
+        if (refs != null) {
+            val end = citationWalk(text, refs.range.first)
+            if (end > refs.range.first) {
+                found.add(refs.range.first..(end - 1))
+
+                // (g) Acknowledgments directly ahead of the references list:
+                //     only believable when anchored to a found list, which is
+                //     what keeps a body mention from deleting prose.
+                val ackFrom = maxOf(0, refs.range.first - ACK_BEFORE_REFS)
+                ACK_JOINED_ANYWHERE.find(text, ackFrom)?.let { ack ->
+                    if (ack.range.first < refs.range.first) {
+                        found.add(ack.range.first..(refs.range.first - 1))
+                    }
+                }
+            }
+        }
+
+        // (f) A rights/permission grant opening the document ("Provided
+        //     proper attribution is provided, Google hereby grants…"): skip
+        //     from char 0 through the end of the sentence holding the match.
+        //     Position-bounded to the very head and sentence-bounded on the
+        //     right; if no sentence boundary shows up nearby, skip nothing.
+        //     FLOWED heads only (no newline in the first GRANT_HEAD_CHARS):
+        //     a structured head keeps its title on a line above the rights
+        //     line, and skipping "0..sentence end" there deletes the title —
+        //     the line-based RIGHTS pass already covers that shape.
+        if (text.take(GRANT_HEAD_CHARS).contains('\n')) return
+        val grant = RIGHTS_FLOWED.find(text)
+        if (grant != null && grant.range.first < GRANT_HEAD_CHARS) {
+            val dot = text.indexOf(". ", grant.range.last)
+            if (dot in grant.range.last until GRANT_MAX_END) found.add(0..dot)
+        }
+    }
+
+    /**
+     * Exclusive end of the citation-dense region starting at [from]: advance
+     * window by window while each holds at least [CITATION_MIN_MARKS] year
+     * ("2018.", "1997a") or bracket ("[12]") citation marks. Returns [from]
+     * itself when the very first window is sparse — i.e. "not a list at all".
+     */
+    private fun citationWalk(text: String, from: Int): Int {
+        var at = from
+        while (at < text.length) {
+            val w = text.substring(at, minOf(text.length, at + CITATION_WINDOW))
+            val marks = CITATION_YEAR.findAll(w).count() + CITATION_BRACKET.findAll(w).count()
+            if (marks < CITATION_MIN_MARKS) break
+            at += CITATION_WINDOW
+        }
+        return minOf(at, text.length)
     }
 
     /**
@@ -175,6 +252,45 @@ object Boilerplate {
 
     private val ACK_JOINED = Regex(
         """^[ \t]*(\d{1,2}[.)]?[ \t]+)?(acknowledge?ments?)[ \t]+[A-Z]""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // ---- flowed-text (newline-free) patterns; see flowedRanges ----
+
+    /** How far the acknowledgments block may sit ahead of the references. */
+    private const val ACK_BEFORE_REFS = 3000
+    /** A rights grant is only believable at the very top of the document. */
+    private const val GRANT_HEAD_CHARS = 600
+    /** …and its closing sentence boundary must show up soon after. */
+    private const val GRANT_MAX_END = 900
+
+    /** References list start only believable in the back half of the doc. */
+    private const val FLOWED_TAIL_FRACTION = 0.5
+
+    /** Citation-density walk that finds where a reference list ends. */
+    private const val CITATION_WINDOW = 1000
+    private const val CITATION_MIN_MARKS = 2
+    private val CITATION_YEAR = Regex("""\b(19|20)\d{2}[a-z]?\b""")
+    private val CITATION_BRACKET = Regex("""\[\d{1,3}\]""")
+
+    /**
+     * A flowed reference list's opening: the heading glued to a bracket
+     * citation ("References [1]") or to an author-year entry ("References
+     * Kevin Clark, …"). Capitalized heading only — lowercase is prose.
+     */
+    private val REFS_FLOWED = Regex(
+        """\b(References|Bibliography|REFERENCES)\s*(\[\s*1\s*\]|(?=[A-Z][a-z]))"""
+    )
+
+    /** Acknowledgments heading glued mid-flow to its first sentence. */
+    private val ACK_JOINED_ANYWHERE = Regex(
+        """\bAcknowledge?ments?\s+[A-Z]"""
+    )
+
+    /** Rights/permission grants that open re-flowed papers. */
+    private val RIGHTS_FLOWED = Regex(
+        """(hereby grants? permission|permission (is granted|to (reproduce|reprint|make digital or hard copies))|""" +
+        """all rights reserved|licen[cs]ed under|creative commons)""",
         RegexOption.IGNORE_CASE
     )
 }
