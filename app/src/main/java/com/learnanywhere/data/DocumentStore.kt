@@ -234,8 +234,14 @@ class DocumentStore(
             val classifier = boilerplateClassifier
             var durable = true
             val ranges = try {
-                classifier?.classify(doc.text)
-                    ?: com.learnanywhere.core.Boilerplate.heuristicRanges(doc.text)
+                // classifyOrNull is null when the LLM pass didn't run (no
+                // key, quota 429, transport error): use heuristics for now
+                // but don't persist them, so a later cold start retries.
+                val llmResult = classifier?.classifyOrNull(doc.text)
+                if (llmResult != null) llmResult else {
+                    durable = false
+                    com.learnanywhere.core.Boilerplate.heuristicRanges(doc.text)
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "boilerplate classification failed for $id", t)
                 durable = false

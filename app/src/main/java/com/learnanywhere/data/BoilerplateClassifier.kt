@@ -26,24 +26,36 @@ class BoilerplateClassifier(
     private val llm: (suspend (prompt: String) -> String?)? = null
 ) {
 
-    suspend fun classify(text: String): List<IntRange> {
-        val heuristics = try {
-            Boilerplate.heuristicRanges(text)
-        } catch (t: Throwable) {
-            emptyList()
-        }
-        val ask = llm ?: return heuristics
+    suspend fun classify(text: String): List<IntRange> =
+        classifyOrNull(text) ?: safeHeuristics(text)
+
+    /**
+     * Like [classify], but null when the LLM pass did not actually run (no
+     * lambda, null reply, or an exception) — so the caller can fall back to
+     * heuristics WITHOUT persisting them, and a later cold start retries the
+     * LLM pass. A non-null result always reflects a completed LLM run (or a
+     * blank document, where there is nothing a retry could add).
+     */
+    suspend fun classifyOrNull(text: String): List<IntRange>? {
+        val heuristics = safeHeuristics(text)
+        val ask = llm ?: return null
         if (text.isBlank()) return heuristics
         return try {
-            val reply = ask(prompt(text)) ?: return heuristics
+            val reply = ask(prompt(text)) ?: return null
             val located = parse(reply).mapNotNull { locate(text, it) }
             val merged = Ranges.normalize(heuristics + located, text.length)
             // Last line of defence: if honouring the model would mute most of
             // the document, the model is wrong about what "boilerplate" is.
             if (Ranges.span(merged) > text.length * MAX_TOTAL_FRACTION) heuristics else merged
         } catch (t: Throwable) {
-            heuristics
+            null
         }
+    }
+
+    private fun safeHeuristics(text: String): List<IntRange> = try {
+        Boilerplate.heuristicRanges(text)
+    } catch (t: Throwable) {
+        emptyList()
     }
 
     // ------------------------------------------------------------------
