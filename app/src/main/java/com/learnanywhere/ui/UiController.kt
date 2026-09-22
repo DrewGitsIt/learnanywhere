@@ -95,7 +95,11 @@ class UiController(
     data class ReadingState(
         val docId: String,
         val docTitle: String,
-        val sections: List<String>,
+        /**
+         * Sections carry their offset in the stored text (DESIGN §7.4) so a
+         * voice seek's quote offset and the skip-map share one geometry.
+         */
+        val sections: List<com.learnanywhere.core.Sections.Section>,
         val index: Int
     )
 
@@ -112,6 +116,15 @@ class UiController(
     /** Resume reading automatically once a question's answer finishes. */
     private var resumeAfterAnswer = false
     private var wasPlaying = false
+
+    /**
+     * Voice seek (DESIGN §7.3): where the agent's `seek_quote` was located,
+     * held until the reply has finished being spoken. Jumping mid-sentence
+     * would cut the confirmation ("Jumping to the related-work section.") off
+     * in the middle of itself.
+     */
+    private data class PendingSeek(val docId: String, val offset: Int)
+    private var pendingSeek: PendingSeek? = null
     val apiKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_API_KEY, "").orEmpty())
     val tavilyKey = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_TAVILY_API_KEY, "").orEmpty())
     val model = mutableStateOf(app.prefs.getString(LearnAnywhereApp.KEY_GEMINI_MODEL, LearnAnywhereApp.DEFAULT_MODEL).orEmpty())
@@ -158,6 +171,7 @@ class UiController(
             // doesn't transcribe our own voice output.
             barge.stop()
             sectionSpeaking = false   // an interrupted section must not auto-advance
+            pendingSeek = null        // ...nor may an armed jump fire on the pause
             player.pause()
             voice.start { text -> handleUtterance(text) }
         } else {
@@ -218,20 +232,31 @@ class UiController(
     // ------------------------------------------------------------------
     // Read-with-me
 
-    fun startReadWithMe(docId: String) {
+    /**
+     * [startIndex] exists for voice seek (DESIGN §7.3): "drop me in the part
+     * about X" from idle starts the session already parked on that section.
+     *
+     * Sectioning is skip-map filtered from the CACHE only (DESIGN §7.2): the
+     * first tap must never block on a classification round-trip, and warming
+     * at add-time/startup is what makes the sidecar hot by now. A cold cache
+     * simply reads the boilerplate too, which is the old behaviour.
+     */
+    fun startReadWithMe(docId: String, startIndex: Int = 0) {
         val d = app.store.byId(docId) ?: return
         if (d.text.isBlank()) {
             error.value = "No readable text in this document (scanned PDF?)."
             return
         }
-        val secs = com.learnanywhere.core.Sections.split(d.text)
+        val secs = com.learnanywhere.core.Sections.splitWithOffsets(
+            d.text, skip = app.store.cachedSkipRanges(docId))
         if (secs.isEmpty()) { error.value = "Nothing to read."; return }
         player.stop()   // clear any audiobook queue
         readingPages.clear()
         readingPage.value = null
         reading.value = ReadingState(docId, d.title, secs, 0)
         resumeAfterAnswer = false
-        speakSection(0)
+        pendingSeek = null
+        speakSection(startIndex.coerceIn(0, secs.size - 1))
     }
 
     fun nextSection() { reading.value?.let { speakSection(it.index + 1) } }
@@ -242,6 +267,7 @@ class UiController(
         reading.value = null
         sectionSpeaking = false
         resumeAfterAnswer = false
+        pendingSeek = null
         readingUtteranceIds.value = emptySet()
         readingPage.value = null
         readingPages.clear()
@@ -268,7 +294,7 @@ class UiController(
         sectionSpeaking = true
         updateReadingPage(r.docId, r.sections, i)
         val ids = player.sayChain(
-            listOf("Section ${i + 1}.") + com.learnanywhere.core.Sentences.split(r.sections[i]),
+            listOf("Section ${i + 1}.") + com.learnanywhere.core.Sentences.split(r.sections[i].text),
             onDone = {
                 // Re-check: onDone is cancelled on supersede, but the session
                 // may still have moved on between the last sentence and here.
@@ -279,13 +305,15 @@ class UiController(
     }
 
     /** Resolve (once per section) which PDF page the section starts on. */
-    private fun updateReadingPage(docId: String, sections: List<String>, i: Int) {
+    private fun updateReadingPage(
+        docId: String, sections: List<com.learnanywhere.core.Sections.Section>, i: Int
+    ) {
         if (readingPages.containsKey(i)) { readingPage.value = readingPages[i]; return }
         readingPage.value = null
         scope.launch {
             val p = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 app.store.pagedTextFor(docId)?.let {
-                    com.learnanywhere.core.PageMap.pageFor(it, sections[i])
+                    com.learnanywhere.core.PageMap.pageFor(it, sections[i].text)
                 }
             }
             readingPages[i] = p
@@ -302,6 +330,10 @@ class UiController(
      * because QUEUE_ADD chains can blip the playing state between utterances.
      */
     private fun onSpeechFinished() {
+        // A pending voice seek outranks resuming: the user asked to MOVE, so
+        // the old cursor is not where they want to be. (Arming already
+        // cleared resumeAfterAnswer; this is the ordering, made explicit.)
+        if (pendingSeek != null) { scheduleSeek(); return }
         reading.value ?: return
         if (sectionSpeaking || !resumeAfterAnswer || busy.value) return
         scope.launch {
@@ -313,6 +345,86 @@ class UiController(
                 resumeAfterAnswer = false
                 speakSection(rr.index)
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Voice seek (DESIGN §7.3)
+
+    /**
+     * Arm the jump the agent's `seek_quote` describes, or do nothing at all.
+     *
+     * Every step is allowed to miss — no quote, no resolvable document, a
+     * quote that drifted too far to locate — and a miss is silent by design:
+     * the spoken answer already stands on its own (DESIGN §7.3, "misses
+     * degrade gracefully").
+     *
+     * [spoken] is whether this turn actually queued speech. If it did, the
+     * jump waits for that speech to finish naturally; if it didn't (replies
+     * muted), there is nothing to wait for and it happens now.
+     */
+    private fun armSeek(
+        reply: com.learnanywhere.agent.LearnAnywhereAgent.AgentReply, spoken: Boolean
+    ) {
+        val quote = reply.seekQuote?.takeIf { it.isNotBlank() } ?: return
+        // The reply's own cited-document resolution first; with no citation,
+        // a single attached document is unambiguous enough to act on.
+        val docId = reply.citedDocId ?: selected.value.singleOrNull() ?: return
+        val doc = app.store.byId(docId) ?: return
+        val offset = com.learnanywhere.core.TextLocate.find(doc.text, quote) ?: return
+        // We are moving, not resuming: the old section must not come back.
+        resumeAfterAnswer = false
+        pendingSeek = PendingSeek(docId, offset)
+        if (spoken) scheduleSeek() else performSeek()
+    }
+
+    /**
+     * Fire the pending seek once the voice is actually quiet. Debounced and
+     * re-checked exactly like the resume path, because a QUEUE_ADD chain blips
+     * playing→stopped between utterances; and re-entrant-safe, because both
+     * the arming call and the playing→stopped handler may schedule it.
+     *
+     * Arming schedules a check too, not just the transition handler: a short
+     * answer can finish speaking before the turn returns, and then no
+     * playing→stopped edge is ever left to wait for.
+     */
+    private fun scheduleSeek() {
+        scope.launch {
+            kotlinx.coroutines.delay(600)
+            if (player.stateFlow.value.isPlaying || busy.value ||
+                voiceState.value != com.learnanywhere.speech.VoiceInput.State.IDLE) return@launch
+            performSeek()
+        }
+    }
+
+    /**
+     * Do the jump: re-section the target document (same geometry as
+     * read-with-me — cached skip-map, section offsets) and speak from the
+     * section the offset lands in. Reading the same document moves the
+     * cursor; anything else (idle, or reading a different document) starts a
+     * fresh session there, without the end-of-document announcement.
+     */
+    private fun performSeek() {
+        val seek = pendingSeek ?: return
+        pendingSeek = null
+        val d = app.store.byId(seek.docId) ?: return
+        val secs = com.learnanywhere.core.Sections.splitWithOffsets(
+            d.text, skip = app.store.cachedSkipRanges(seek.docId))
+        if (secs.isEmpty()) return
+        val idx = com.learnanywhere.core.Seek.sectionIndexFor(secs, seek.offset)
+        resumeAfterAnswer = false
+        val r = reading.value
+        if (r != null && r.docId == seek.docId) {
+            // Re-sectioning may differ from the session's own split if the
+            // skip-map warmed in between, so the sections go along with the
+            // index — the offset we resolved belongs to THIS geometry.
+            readingPages.clear()
+            readingPage.value = null
+            reading.value = r.copy(sections = secs)
+            speakSection(idx)
+        } else {
+            if (r != null) endReadWithMe(announce = false)
+            startReadWithMe(seek.docId, startIndex = idx)
         }
     }
 
@@ -375,6 +487,7 @@ class UiController(
     fun ask(q: String) {
         if (q.isBlank()) return
         val gen = ++askGen
+        pendingSeek = null   // a new question supersedes the last one's jump
         askJob?.cancel()
         askJob = scope.launch {
             busy.value = true
@@ -449,7 +562,7 @@ class UiController(
                     resumeAfterAnswer = true
                     "Reading session: you are reading the document \"${r.docTitle}\" to the user, " +
                             "currently at section ${r.index + 1} of ${r.sections.size}. That section: " +
-                            "\"${r.sections[r.index].take(1200)}\". " +
+                            "\"${r.sections[r.index].text.take(1200)}\". " +
                             "Answer in the context of this passage when it applies."
                 }
                 val extras = listOfNotNull(
@@ -481,8 +594,11 @@ class UiController(
                 // rounds, or stream failure) — speak the final text whole.
                 // enqueueSay (not sayOnce) so the highlight has an id to follow.
                 if (speak && !spoke && reply.text.isNotBlank()) {
-                    say(reply.text, true)
+                    say(reply.text, true); spoke = true
                 }
+                // Voice seek: armed only once we know whether anything was
+                // actually queued to speak (DESIGN §7.3).
+                armSeek(reply, spoken = spoke)
                 }
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
                 error.value = "Turn timed out after ${TURN_TIMEOUT_MS / 1000}s"
@@ -609,9 +725,10 @@ class UiController(
         val ids = selected.value.toList()
         if (ids.isEmpty()) { error.value = "Select at least one document to listen to."; return@launch }
         error.value = null
+        pendingSeek = null   // the user chose what to play; don't jump afterwards
         player.play(ids, rate = rate.value)
     }
-    fun pause()    = scope.launch { player.pause() }
+    fun pause()    = scope.launch { pendingSeek = null; player.pause() }
     fun resume()   = scope.launch { player.resume() }
     fun next()     = scope.launch { player.next() }
     fun prev()     = scope.launch { player.prev() }
@@ -622,7 +739,7 @@ class UiController(
         player.setRate(r)
     }
 
-    fun stop() = scope.launch { player.stop() }
+    fun stop() = scope.launch { pendingSeek = null; player.stop() }
 
     // ---- car bridge helpers (used by LearnStudyProvider / MediaBrowserService) ----
 

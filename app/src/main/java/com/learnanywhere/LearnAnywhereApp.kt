@@ -71,9 +71,38 @@ class LearnAnywhereApp : Application() {
         )
         ui = com.learnanywhere.ui.UiController(this)
 
+        // ---- boilerplate skip-map (DESIGN §7.2) ----
+        // Sidecar files, never a column on the document: the stored text must
+        // stay byte-identical for the prompt cache (§5).
+        store.skipStore = com.learnanywhere.data.SkipStore(java.io.File(filesDir, "skipmaps"))
+        // One plain-text Gemini call per document, no schema and no tools.
+        // Null when there is no key — classifyOrNull reads that as "the LLM
+        // pass didn't run" and falls back to heuristics WITHOUT persisting
+        // them, so a later start retries. Exceptions deliberately propagate
+        // into the same path.
+        store.boilerplateClassifier = com.learnanywhere.data.BoilerplateClassifier { prompt ->
+            val key = prefs.getString(KEY_GEMINI_API_KEY, "").orEmpty()
+            if (key.isBlank()) null
+            else com.learnanywhere.agent.Gemini(
+                { key },
+                { prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL).orEmpty() }
+            ).generateText(
+                contents = listOf(com.learnanywhere.agent.Gemini.Message(
+                    "user", listOf(com.learnanywhere.agent.Gemini.Part(text = prompt)))),
+                maxTokens = 2048,
+                thinkingLevel = "low"
+            ).text
+        }
+        // Plain audiobook playback speaks the kept text (DESIGN §7.2). Cached
+        // only — see DocumentStore.cachedSkipRanges — and never blank-out:
+        // [AudiobookPlayer] falls back to the full text.
+        ui.player.speakableText = { d ->
+            com.learnanywhere.core.Boilerplate.keptText(d.text, store.cachedSkipRanges(d.id))
+        }
+
         // ---- persistence plumbing (Document ↔ Room + [AppPdfStore]) ----
-        store.onPdfAdded = { doc -> persistPdf(doc) }
-        store.onTextOrUrlAdded = { doc -> persistRow(doc) }
+        store.onPdfAdded = { doc -> persistPdf(doc); warmSkipMap(doc) }
+        store.onTextOrUrlAdded = { doc -> persistRow(doc); warmSkipMap(doc) }
         // Page offsets for "figures ride along" (DESIGN §6.5). Derived, never
         // persisted: re-extracted from the stored bytes and cached by the store.
         store.pagedTextProvider = { id ->
@@ -115,6 +144,39 @@ class LearnAnywhereApp : Application() {
                 store.hydrate(rehydrated)
                 ui.refreshFromStore()
                 backfillPdfText(rows)
+                rehydrated.forEach { warmSkipMap(it) }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Skip-map warming (DESIGN §7.2)
+    // ------------------------------------------------------------------
+
+    /** Documents whose skip-map this process has already asked for. */
+    private val skipWarmed = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /**
+     * Classify a document's boilerplate ahead of time — at startup and on
+     * every add — so the sidecar is hot before anyone presses play. Playback
+     * and read-with-me read the CACHE only ([DocumentStore.cachedSkipRanges]),
+     * which is what keeps the first tap off the network; this is the other
+     * half of that bargain.
+     *
+     * Once per doc per process: [DocumentStore.skipRangesFor] memoizes, but
+     * the Room flow re-emits on every write and there is no point re-entering
+     * it. Text-less docs are left alone — [backfillPdfText] may still be
+     * filling them in, and the next emission warms them for real.
+     */
+    private fun warmSkipMap(doc: Document) {
+        if (doc.text.isBlank()) return
+        if (!skipWarmed.add(doc.id)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                store.skipRangesFor(doc.id)
+            } catch (t: Throwable) {
+                // Boilerplate is a nicety: warming failures are invisible.
+                android.util.Log.w("LearnAnywhereApp", "skip-map warm failed for ${doc.id}", t)
             }
         }
     }

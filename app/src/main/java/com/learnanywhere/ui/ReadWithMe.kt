@@ -26,7 +26,7 @@ internal fun ReadWithMeCard(
     r: UiController.ReadingState,
     onOpenPage: (String, Int) -> Unit
 ) {
-    val section = r.sections[r.index]
+    val section = r.sections.getOrNull(r.index)?.text.orEmpty()
     val playback = ctl.playback.value
     // Gated on the chain's utterance ids: an answer spoken mid-session must
     // not light up the section text it was asked about.

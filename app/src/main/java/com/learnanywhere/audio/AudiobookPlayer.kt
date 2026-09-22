@@ -55,6 +55,14 @@ class AudiobookPlayer(
     /** id → text of everything in flight, plus the armed chain. See [SpeechBookkeeper]. */
     private val book = SpeechBookkeeper()
 
+    /**
+     * What to actually speak for a document (DESIGN §7.2): the app wires this
+     * to the skip-map filter so arXiv banners, licence blocks and the
+     * bibliography pass silently. Identity by default — the player itself
+     * knows nothing about boilerplate.
+     */
+    var speakableText: (Document) -> String = { it.text }
+
     // ---- neural voice (Piper) routing ----
     private var neural: NeuralTts? = null
     var neuralEnabled: () -> Boolean = { false }
@@ -328,7 +336,12 @@ class AudiobookPlayer(
         if (s.queue.isEmpty() || !s.ready) { publish { it.copy(isPlaying = false) } ; return }
         val id = s.queue.getOrNull(s.cursor) ?: return
         val doc = library().firstOrNull { it.id == id }
-        val text = doc?.text ?: ""
+        val raw = doc?.text ?: ""
+        // A skip-map must never silence a document: a blank (or throwing)
+        // filter falls back to the full text.
+        val text = if (doc == null) "" else
+            (try { speakableText(doc) } catch (t: Throwable) { raw })
+                .takeIf { it.isNotBlank() } ?: raw
         if (text.isBlank()) {
             // Can't read empty text (e.g. scanned PDF); move on so we don't wedge.
             next(); return

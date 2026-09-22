@@ -257,6 +257,21 @@ class DocumentStore(
         }
     }
 
+    /**
+     * The skip-map [skipRangesFor] has ALREADY produced for [id] — memory
+     * first, sidecar second — or empty when none exists yet. Never classifies,
+     * never touches the network, never suspends: this is the path playback and
+     * read-with-me take on a tap, and the first tap must not wait on Gemini.
+     * Warming at add-time/startup ([LearnAnywhereApp]) is what makes the
+     * sidecar hot by the time anyone presses play.
+     */
+    fun cachedSkipRanges(id: String): List<IntRange> {
+        skipRanges[id]?.let { return it }
+        val saved = skipStore?.load(id) ?: return emptyList()
+        skipRanges[id] = saved
+        return saved
+    }
+
     fun byId(id: String): Document? = _docs[id]
     fun selectedIds(selector: (Document) -> Boolean): List<String> =
         _docs.values.filter(selector).map { it.id }
