@@ -102,8 +102,8 @@ Notes on the pieces:
 - **Speech in and out** are one dependency: the sherpa-onnx AAR provides Silero
   VAD, a streaming zipformer for live partials, a whisper second pass for
   accuracy, and the Piper voice. Models are fetched by a script, not committed.
-- **The agent loop** is hand-rolled against the Gemini REST API — no LangChain
-  class dependency in the APK. Replies come back as structured JSON so the
+- **The agent loop** is hand-rolled against the Gemini REST API — no agent
+  framework in the APK. Replies come back as structured JSON so the
   citation and the seek target are fields, not regex bait. The tool loop has a
   hard iteration cap, returns tool failures to the model rather than throwing,
   and validates any URL the model asks it to fetch.
