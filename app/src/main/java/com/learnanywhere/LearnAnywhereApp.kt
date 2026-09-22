@@ -74,6 +74,20 @@ class LearnAnywhereApp : Application() {
         // ---- persistence plumbing (Document ↔ Room + [AppPdfStore]) ----
         store.onPdfAdded = { doc -> persistPdf(doc) }
         store.onTextOrUrlAdded = { doc -> persistRow(doc) }
+        // Page offsets for "figures ride along" (DESIGN §6.5). Derived, never
+        // persisted: re-extracted from the stored bytes and cached by the store.
+        store.pagedTextProvider = { id ->
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                try {
+                    val bytes = db.pdfStore.readPdf(id)
+                    if (bytes.isEmpty()) null
+                    else com.learnanywhere.data.PdfText.extractPaged(bytes)
+                } catch (t: Throwable) {
+                    android.util.Log.w("LearnAnywhereApp", "paged text failed for $id", t)
+                    null
+                }
+            }
+        }
         store.onRemoved = { id ->
             scope.launch(Dispatchers.IO) {
                 db.db.documents().byId(id)?.let { db.db.documents().delete(it) }
