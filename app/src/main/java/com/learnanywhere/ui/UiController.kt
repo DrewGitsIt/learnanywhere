@@ -40,7 +40,9 @@ class UiController(
         val text: String,
         val citedDocTitle: String? = null,
         val citedFigure: String? = null,
-        val sources: List<String> = emptyList()
+        val sources: List<String> = emptyList(),
+        /** 1-based page of the cited document the figure/table is on. */
+        val citedPage: Int? = null
     )
 
     /** The running transcript of the current conversation (rendered as a thread). */
@@ -48,7 +50,13 @@ class UiController(
     /** All saved sessions, newest first (Room flow). */
     val sessions = mutableStateOf<List<com.learnanywhere.app.db.ConversationRow>>(emptyList())
 
-    private var conversationId: String? = null
+    /**
+     * Row id of the session the live [thread] belongs to, or null before the
+     * first turn of a new conversation is persisted. The pager needs this to
+     * tell "render the live thread" from "render the stored transcript".
+     */
+    val currentSessionId = mutableStateOf<String?>(null)
+
     private var conversationTitle: String? = null
     private var conversationCreatedAt: Long = 0L
     val error = mutableStateOf<String?>(null)
@@ -73,6 +81,13 @@ class UiController(
     val neuralVoice = mutableStateOf(app.prefs.getBoolean(LearnAnywhereApp.KEY_NEURAL_TTS, true))
     /** Live text of the reply currently streaming in (null when idle). */
     val streamingAnswer = mutableStateOf<String?>(null)
+    /**
+     * Utterance ids spoken for the current answer. The reply bubble highlights
+     * `playback.activeText` only while the speaking utterance is one of these —
+     * otherwise an unrelated utterance (a cue, a read-with-me section) whose
+     * text happens to occur in the bubble would light it up.
+     */
+    val replyUtteranceIds = mutableStateOf<Set<String>>(emptySet())
 
     private val barge = com.learnanywhere.speech.BargeInGuard(app.applicationContext)
 
@@ -86,6 +101,12 @@ class UiController(
 
     /** Non-null while a guided reading session is active. */
     val reading = mutableStateOf<ReadingState?>(null)
+    /** Utterance ids of the chain speaking the current section (read-along highlight). */
+    val readingUtteranceIds = mutableStateOf<Set<String>>(emptySet())
+    /** 1-based PDF page the current section starts on; null while unknown or non-PDF. */
+    val readingPage = mutableStateOf<Int?>(null)
+    /** Page per section index; O(document) to compute, so never recomputed. */
+    private val readingPages = HashMap<Int, Int?>()
     /** True while the current section is being read (vs. answering a question). */
     private var sectionSpeaking = false
     /** Resume reading automatically once a question's answer finishes. */
@@ -206,6 +227,8 @@ class UiController(
         val secs = com.learnanywhere.core.Sections.split(d.text)
         if (secs.isEmpty()) { error.value = "Nothing to read."; return }
         player.stop()   // clear any audiobook queue
+        readingPages.clear()
+        readingPage.value = null
         reading.value = ReadingState(docId, d.title, secs, 0)
         resumeAfterAnswer = false
         speakSection(0)
@@ -219,41 +242,74 @@ class UiController(
         reading.value = null
         sectionSpeaking = false
         resumeAfterAnswer = false
+        readingUtteranceIds.value = emptySet()
+        readingPage.value = null
+        readingPages.clear()
         if (wasActive) {
             if (announce) player.sayOnce("That's the end of the document.")
             else player.pause()
         }
     }
 
+    /**
+     * Speak one section as a sentence chain: each sentence is its own
+     * utterance, so the card can highlight the sentence being spoken and a
+     * rate change lands within a sentence (DESIGN §6.4/§6.6).
+     *
+     * Auto-advance hangs off [AudiobookPlayer.sayChain]'s onDone, which fires
+     * only on natural completion — any interrupt (barge-in, a question, stop)
+     * silently cancels it, which is exactly the wanted behaviour. The Next
+     * button stays the manual path.
+     */
     private fun speakSection(i: Int) {
         val r = reading.value ?: return
         if (i >= r.sections.size) { endReadWithMe(announce = true); return }
         reading.value = r.copy(index = i)
         sectionSpeaking = true
-        player.sayOnce("Section ${i + 1}. " + r.sections[i])
+        updateReadingPage(r.docId, r.sections, i)
+        val ids = player.sayChain(
+            listOf("Section ${i + 1}.") + com.learnanywhere.core.Sentences.split(r.sections[i]),
+            onDone = {
+                // Re-check: onDone is cancelled on supersede, but the session
+                // may still have moved on between the last sentence and here.
+                val rr = reading.value
+                if (rr != null && rr.docId == r.docId && rr.index == i) speakSection(i + 1)
+            })
+        readingUtteranceIds.value = ids.toSet()
+    }
+
+    /** Resolve (once per section) which PDF page the section starts on. */
+    private fun updateReadingPage(docId: String, sections: List<String>, i: Int) {
+        if (readingPages.containsKey(i)) { readingPage.value = readingPages[i]; return }
+        readingPage.value = null
+        scope.launch {
+            val p = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                app.store.pagedTextFor(docId)?.let {
+                    com.learnanywhere.core.PageMap.pageFor(it, sections[i])
+                }
+            }
+            readingPages[i] = p
+            val rr = reading.value
+            if (rr != null && rr.docId == docId && rr.index == i) readingPage.value = p
+        }
     }
 
     /**
-     * Fires on the playing→stopped transition. During a reading session:
-     * a section that finished naturally auto-advances; an answer that
-     * finished resumes the interrupted section. Debounced + re-checked,
-     * because QUEUE_ADD chains can blip the playing state between
-     * utterances.
+     * Fires on the playing→stopped transition. Section auto-advance lives in
+     * the chain's onDone; what remains here is resuming an interrupted
+     * section once a question's answer has been spoken (answers stream through
+     * enqueueSay, which has no completion callback). Debounced + re-checked,
+     * because QUEUE_ADD chains can blip the playing state between utterances.
      */
     private fun onSpeechFinished() {
-        val r = reading.value ?: return
-        val advancing = sectionSpeaking
-        val resuming = !sectionSpeaking && resumeAfterAnswer && !busy.value
-        if (!advancing && !resuming) return
+        reading.value ?: return
+        if (sectionSpeaking || !resumeAfterAnswer || busy.value) return
         scope.launch {
             kotlinx.coroutines.delay(600)
             val rr = reading.value ?: return@launch
             if (player.stateFlow.value.isPlaying || busy.value ||
                 voiceState.value != com.learnanywhere.speech.VoiceInput.State.IDLE) return@launch
-            if (advancing && sectionSpeaking) {
-                sectionSpeaking = false
-                speakSection(rr.index + 1)
-            } else if (resuming && resumeAfterAnswer) {
+            if (resumeAfterAnswer) {
                 resumeAfterAnswer = false
                 speakSection(rr.index)
             }
@@ -325,7 +381,14 @@ class UiController(
             error.value = null
             question.value = q
             thread.value = thread.value + ChatTurn("user", q)
+            replyUtteranceIds.value = emptySet()   // last turn's highlight must not linger
             val speak = speakReplies.value
+            // Every utterance carrying answer text, for the karaoke highlight.
+            val spokenIds = LinkedHashSet<String>()
+            val say = { text: String, flush: Boolean ->
+                spokenIds.add(player.enqueueSay(text, flush))
+                replyUtteranceIds.value = spokenIds.toSet()
+            }
             try {
                 kotlinx.coroutines.withTimeout(TURN_TIMEOUT_MS) {
                 // Voice loop v2: stream the reply — extract the answer field
@@ -345,7 +408,7 @@ class UiController(
                         answerAcc.append(t)
                         streamingAnswer.value = (streamingAnswer.value ?: "") + t
                         chunker.feed(t).forEach { s ->
-                            player.enqueueSay(s, flush = !spoke); spoke = true
+                            say(s, !spoke); spoke = true
                         }
                     }
                 } else null
@@ -353,7 +416,7 @@ class UiController(
                     // Speak any tail of the round that just ended (model
                     // narration like "Let me look that up."), then reset.
                     chunker.flush()?.let {
-                        if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true }
+                        if (speak) { say(it, !spoke); spoke = true }
                     }
                     extractor = com.learnanywhere.core.StreamingAnswerExtractor()
                     chunker = com.learnanywhere.core.SentenceChunker()
@@ -379,6 +442,10 @@ class UiController(
                 // Read-with-me: give the agent the reading cursor as context,
                 // and arrange to resume reading once the answer is spoken.
                 val readingExtra = reading.value?.let { r ->
+                    // The answer supersedes the section chain either way; clear
+                    // the flag so a TYPED question resumes like a spoken one
+                    // (toggleVoice clears it on the spoken path).
+                    sectionSpeaking = false
                     resumeAfterAnswer = true
                     "Reading session: you are reading the document \"${r.docTitle}\" to the user, " +
                             "currently at section ${r.index + 1} of ${r.sections.size}. That section: " +
@@ -392,25 +459,29 @@ class UiController(
                 ).joinToString("\n\n").ifBlank { null }
                 val reply = app.agent.ask(q, systemExtra = extras, onAnswerDelta = onDelta,
                     onRoundStart = onRoundStart, onToolCall = onToolCall)
-                chunker.flush()?.let { if (speak) { player.enqueueSay(it, flush = !spoke); spoke = true } }
+                chunker.flush()?.let { if (speak) { say(it, !spoke); spoke = true } }
                 // Stream dropped mid-answer and the non-streamed retry
                 // finished it: speak the part that never arrived as deltas.
                 if (speak && spoke && answerAcc.isNotEmpty() &&
                     reply.text.length > answerAcc.length &&
                     reply.text.startsWith(answerAcc.toString())) {
-                    player.enqueueSay(reply.text.substring(answerAcc.length).trim(), flush = false)
+                    say(reply.text.substring(answerAcc.length).trim(), false)
                 }
                 this@UiController.reply.value = reply
                 val citedTitle = reply.citedDocId?.let { id ->
                     app.store.byId(id)?.title
                 }
+                // Model-supplied and unvalidated — clamp before anyone indexes figures with it.
+                val citedPage = clampCitedPage(
+                    reply.citedPage, reply.citedDocId?.let { app.store.byId(it)?.figures?.size } ?: 0)
                 thread.value = thread.value + ChatTurn(
-                    "model", reply.text, citedTitle, reply.citedFigure, reply.sources)
-                persistTurn(q, reply.text, citedTitle, reply.citedFigure, reply.sources)
+                    "model", reply.text, citedTitle, reply.citedFigure, reply.sources, citedPage)
+                persistTurn(q, reply.text, citedTitle, reply.citedFigure, citedPage, reply.sources)
                 // Fallback: nothing streamed (schema fallback, tool-only
                 // rounds, or stream failure) — speak the final text whole.
+                // enqueueSay (not sayOnce) so the highlight has an id to follow.
                 if (speak && !spoke && reply.text.isNotBlank()) {
-                    player.sayOnce(reply.text)
+                    say(reply.text, true)
                 }
                 }
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
@@ -446,13 +517,13 @@ class UiController(
     /** Write one exchange to the current session (creating it on first ask). */
     private fun persistTurn(
         q: String, answer: String,
-        citedDocTitle: String?, citedFigure: String?, sources: List<String>
+        citedDocTitle: String?, citedFigure: String?, citedPage: Int?, sources: List<String>
     ) = scope.launch(Dispatchers.IO) {
         try {
             val dao = app.db.db.conversations()
             val now = System.currentTimeMillis()
-            val cid = conversationId ?: java.util.UUID.randomUUID().toString().also {
-                conversationId = it
+            val cid = currentSessionId.value ?: java.util.UUID.randomUUID().toString().also {
+                currentSessionId.value = it
                 conversationTitle = q.take(60)
                 conversationCreatedAt = now
             }
@@ -470,6 +541,7 @@ class UiController(
                 id = java.util.UUID.randomUUID().toString(),
                 conversationId = cid, role = "model", text = answer,
                 citedDocTitle = citedDocTitle, citedFigure = citedFigure,
+                citedPage = citedPage,
                 sources = sources.joinToString("\n").ifBlank { null },
                 createdAt = now + 1))
         } catch (t: Throwable) {
@@ -482,14 +554,11 @@ class UiController(
     fun resumeSession(row: com.learnanywhere.app.db.ConversationRow) = scope.launch(Dispatchers.IO) {
         try {
             val msgs = app.db.db.conversations().messages(row.id)
-            conversationId = row.id
+            currentSessionId.value = row.id
             conversationTitle = row.title
             conversationCreatedAt = row.createdAt
             app.agent.restoreHistory(msgs.map { it.role to it.text })
-            thread.value = msgs.map { m ->
-                ChatTurn(m.role, m.text, m.citedDocTitle, m.citedFigure,
-                    m.sources?.split("\n")?.filter { it.isNotBlank() } ?: emptyList())
-            }
+            thread.value = msgs.map { it.toTurn() }
             reply.value = null
             error.value = null
         } catch (t: Throwable) {
@@ -497,11 +566,31 @@ class UiController(
         }
     }
 
+    /**
+     * Read one session's transcript for display. Unlike [resumeSession] this
+     * mutates nothing — the pager renders neighbouring session pages with it,
+     * and only the page the user settles on is actually resumed.
+     */
+    suspend fun loadTranscript(cid: String): List<ChatTurn> =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            try {
+                app.db.db.conversations().messages(cid).map { it.toTurn() }
+            } catch (t: Throwable) {
+                android.util.Log.w("UiController", "loadTranscript failed", t)
+                emptyList()
+            }
+        }
+
+    private fun com.learnanywhere.app.db.MessageRow.toTurn() = ChatTurn(
+        role, text, citedDocTitle, citedFigure,
+        sources?.split("\n")?.filter { it.isNotBlank() } ?: emptyList(),
+        citedPage)
+
     fun deleteSession(row: com.learnanywhere.app.db.ConversationRow) = scope.launch(Dispatchers.IO) {
         try {
             app.db.db.conversations().deleteMessages(row.id)
             app.db.db.conversations().deleteConversation(row.id)
-            if (row.id == conversationId) newChat()
+            if (row.id == currentSessionId.value) newChat()
         } catch (t: Throwable) {
             error.value = "Couldn't delete session: ${t.message}"
         }
@@ -526,8 +615,10 @@ class UiController(
     fun resume()   = scope.launch { player.resume() }
     fun next()     = scope.launch { player.next() }
     fun prev()     = scope.launch { player.prev() }
+    /** Persisted: the pref was read at startup but never written (DESIGN §6.6). */
     fun setRate(r: Float) = scope.launch {
         rate.value = r
+        app.prefs.edit().putFloat(LearnAnywhereApp.KEY_TTS_RATE, r).apply()
         player.setRate(r)
     }
 
@@ -632,13 +723,24 @@ class UiController(
      */
     fun newChat() {
         app.agent.clearHistory()
-        conversationId = null
+        currentSessionId.value = null
         conversationTitle = null
         conversationCreatedAt = 0L
         thread.value = emptyList()
         reply.value = null
         question.value = null
         error.value = null
+        replyUtteranceIds.value = emptySet()
+    }
+
+    /**
+     * Asking from Home opens a fresh session (DESIGN §6.1): detach from the
+     * saved session the pager last resumed. A conversation whose first turn
+     * hasn't been persisted yet has no row id and is left alone — asking again
+     * from Home continues it rather than throwing it away.
+     */
+    fun detachSession() {
+        if (currentSessionId.value != null) newChat()
     }
 
     // ---- (a) on-demand figure caption (Gemini vision) ----
