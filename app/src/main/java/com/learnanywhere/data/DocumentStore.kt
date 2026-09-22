@@ -42,6 +42,18 @@ class DocumentStore(
     private val pagedText = java.util.concurrent.ConcurrentHashMap<String, PdfText.Paged>()
     private val pagedTextLock = kotlinx.coroutines.sync.Mutex()
 
+    /**
+     * Skip-map plumbing (DESIGN §7.2), wired at startup by [LearnAnywhereApp]
+     * the same way [pagedTextProvider] is. Both null is a valid configuration:
+     * [skipRangesFor] then falls back to the offline heuristics and simply
+     * recomputes them per process.
+     */
+    var skipStore: SkipStore? = null
+    var boilerplateClassifier: BoilerplateClassifier? = null
+
+    private val skipRanges = java.util.concurrent.ConcurrentHashMap<String, List<IntRange>>()
+    private val skipLock = kotlinx.coroutines.sync.Mutex()
+
     // ------------------------------------------------------------------
     // Add
     // ------------------------------------------------------------------
@@ -154,6 +166,8 @@ class DocumentStore(
     fun remove(id: String) {
         _docs.remove(id)
         pagedText.remove(id)
+        skipRanges.remove(id)
+        skipStore?.remove(id)
         onRemoved?.invoke(id)
     }
 
@@ -190,6 +204,53 @@ class DocumentStore(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Boilerplate skip-map (DESIGN §7.2)
+    // ------------------------------------------------------------------
+
+    /**
+     * The char ranges of [id]'s text that playback and read-with-me pass over
+     * silently. Empty when the document is gone, text-less, or genuinely clean.
+     *
+     * Memoized per process and persisted as a sidecar, because classification
+     * is one network call and a section boundary asks for it every few seconds.
+     * Lookup order: memory -> [SkipStore] -> classify.
+     *
+     * A classifier failure still yields the offline heuristics — but that
+     * result is NOT written to the sidecar, so a cold start after the quota
+     * resets gets the LLM pass it missed. Never throws: boilerplate is a
+     * nicety, and no failure here may stop a document being read.
+     */
+    suspend fun skipRangesFor(id: String): List<IntRange> {
+        skipRanges[id]?.let { return it }
+        val doc = _docs[id] ?: return emptyList()
+        if (doc.text.isBlank()) return emptyList()
+        return skipLock.withLock {
+            skipRanges[id]?.let { return@withLock it }
+            skipStore?.load(id)?.let { saved ->
+                skipRanges[id] = saved
+                return@withLock saved
+            }
+            val classifier = boilerplateClassifier
+            var durable = true
+            val ranges = try {
+                classifier?.classify(doc.text)
+                    ?: com.learnanywhere.core.Boilerplate.heuristicRanges(doc.text)
+            } catch (t: Throwable) {
+                Log.w(TAG, "boilerplate classification failed for $id", t)
+                durable = false
+                try {
+                    com.learnanywhere.core.Boilerplate.heuristicRanges(doc.text)
+                } catch (t2: Throwable) {
+                    emptyList()
+                }
+            }
+            skipRanges[id] = ranges
+            if (durable) skipStore?.save(id, ranges)
+            ranges
+        }
+    }
+
     fun byId(id: String): Document? = _docs[id]
     fun selectedIds(selector: (Document) -> Boolean): List<String> =
         _docs.values.filter(selector).map { it.id }
@@ -202,6 +263,7 @@ class DocumentStore(
         _docs.clear()
         docs.forEach { _docs[it.id] = it }
         pagedText.keys.retainAll(_docs.keys)
+        skipRanges.keys.retainAll(_docs.keys)
     }
 
     // ------------------------------------------------------------------
