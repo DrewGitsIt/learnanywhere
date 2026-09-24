@@ -22,11 +22,16 @@ import java.util.Base64
  *    disabled on 3.7+); thinking tokens count against maxOutputTokens.
  *  - Temperature stays at the model default 1.0 — Gemini 3 docs warn that
  *    lowering it causes looping/degradation.
+ *  - With a [failover] wired (DESIGN.md §8), a request whose model is
+ *    overloaded or out of daily quota is re-sent to the next model in the
+ *    chain instead of surfacing. Null — the default, and what Settings
+ *    "Test connection" uses — means exactly one model per request, as before.
  */
 class Gemini(
     private val apiKey: () -> String,
     private val model: () -> String,
-    private val client: okhttp3.OkHttpClient = OkHttpClientFactory.build()
+    private val client: okhttp3.OkHttpClient = OkHttpClientFactory.build(),
+    private val failover: ModelFailover? = null
 ) {
     data class Part(val text: String? = null,
                     val mime: String? = null,
@@ -107,14 +112,19 @@ class Gemini(
             responseSchemaJson = responseSchemaJson,
             functionDeclarationsJson = functionDeclarationsJson
         )
+        TranscriptLog.log("request", body)
+        return overChain { modelId -> generateOnce(modelId, body) }
+    }
+
+    /** One model's worth of [generateText]: the retry loop, then success or throw. */
+    private suspend fun generateOnce(modelId: String, body: String): Response {
         val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
-                (model().ifBlank { DEFAULT_MODEL }) + ":generateContent"
+                modelId + ":generateContent"
         val req = Request.Builder()
             .url(url)
             .header("x-goog-api-key", apiKey().ifBlank { throw IllegalStateException("No API key") })
             .post(RequestBody.create("application/json".toMediaType(), body.toByteArray(java.nio.charset.StandardCharsets.UTF_8)))
             .build()
-        TranscriptLog.log("request", body)
 
         var attempt = 0
         while (true) {
@@ -136,7 +146,7 @@ class Gemini(
                     val msg = if (resp.code == 429 && isDailyQuota(respBody))
                         "daily free-tier quota exhausted (resets midnight Pacific)"
                     else summarizeError(respBody, "HTTP ${resp.code}")
-                    throw GeminiError(resp.code, msg)
+                    throw GeminiError(resp.code, msg, respBody)
                 }
                 val backoff = 1000L shl (attempt - 1)   // 1s, 2s, 4s…
                 val delay = maxOf(retryDelayMs(respBody) ?: 0L, backoff)
@@ -149,6 +159,47 @@ class Gemini(
     suspend fun ping(): Response =
         generateText(listOf(Message("user", Part(text = "Reply with the single word OK.").let { listOf(it) })),
             maxTokens = 256)
+
+    // ------------------------------------------------------------------
+
+    /**
+     * Runs [attempt] against the failover chain (DESIGN.md §8), moving to the
+     * next model only when the failure is one another model can plausibly
+     * serve — a 503 with this model's retries already spent, or its per-model
+     * daily quota gone. Without a [failover] this calls the user's chip once:
+     * byte-for-byte today's behavior, which is what keeps Settings "Test
+     * connection" an honest test of the chip.
+     *
+     * [mayFailOver] is consulted at failure time, not up front: the streaming
+     * caller uses it to forbid failover once deltas have been spoken, because
+     * a second model would start its answer from the top and the user would
+     * hear the beginning twice.
+     */
+    private suspend fun <T> overChain(
+        mayFailOver: () -> Boolean = { true },
+        attempt: suspend (String) -> T
+    ): T {
+        val preferred = model().ifBlank { DEFAULT_MODEL }
+        val fo = failover ?: return attempt(preferred)
+        val plan = fo.plan(preferred)
+        plan.forEachIndexed { i, route ->
+            try {
+                val r = attempt(route.model)
+                if (route.model != preferred)
+                    TranscriptLog.log("failover", "served by ${route.model} (preferred $preferred)")
+                return r
+            } catch (e: GeminiError) {
+                val kind = ModelFailover.classify(e.code, e.body)
+                if (kind == ModelFailover.Failure.NONE || i == plan.lastIndex || !mayFailOver())
+                    throw e
+                fo.markUnavailable(route, kind)
+                TranscriptLog.log("failover",
+                    "${route.model} $kind (HTTP ${e.code}) → ${plan[i + 1].model}")
+            }
+        }
+        // Unreachable: the last rung always throws.
+        throw GeminiError(0, "no model available")
+    }
 
     // ------------------------------------------------------------------
     // Files API (free tier; 48 h retention; 50 MB / 1,000 pages per PDF)
@@ -256,14 +307,30 @@ class Gemini(
             responseSchemaJson = responseSchemaJson,
             functionDeclarationsJson = functionDeclarationsJson
         )
+        TranscriptLog.log("request(stream)", body)
+        // Deltas are spoken as they arrive, so once ANY content has been
+        // emitted the turn belongs to this model: a fallback would start its
+        // answer from the top and the user would hear the opening twice.
+        // From that point a failure surfaces exactly as it does today.
+        var emitted = false
+        return overChain(mayFailOver = { !emitted }) { modelId ->
+            streamOnce(modelId, body) { d -> emitted = true; onDelta(d) }
+        }
+    }
+
+    /** One model's worth of [generateTextStreamed]. */
+    private suspend fun streamOnce(
+        modelId: String,
+        body: String,
+        onDelta: (String) -> Unit
+    ): Response {
         val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
-                (model().ifBlank { DEFAULT_MODEL }) + ":streamGenerateContent?alt=sse"
+                modelId + ":streamGenerateContent?alt=sse"
         val req = Request.Builder()
             .url(url)
             .header("x-goog-api-key", apiKey().ifBlank { throw IllegalStateException("No API key") })
             .post(RequestBody.create("application/json".toMediaType(), body.toByteArray(java.nio.charset.StandardCharsets.UTF_8)))
             .build()
-        TranscriptLog.log("request(stream)", body)
 
         var attempt = 0
         while (true) {
@@ -281,7 +348,7 @@ class Gemini(
                     val msg = if (resp.code == 429 && isDailyQuota(b))
                         "daily free-tier quota exhausted (resets midnight Pacific)"
                     else summarizeError(b, "HTTP ${resp.code}")
-                    throw GeminiError(resp.code, msg)
+                    throw GeminiError(resp.code, msg, b)
                 }
                 val backoff = 1000L shl (attempt - 1)
                 kotlinx.coroutines.delay(maxOf(retryDelayMs(b) ?: 0L, backoff)
@@ -417,7 +484,12 @@ class Gemini(
     }
 }
 
-class GeminiError(val code: Int, override val message: String) : Exception("Gemini($code): $message")
+/**
+ * [body] is the raw error envelope, kept only so [ModelFailover] can tell a
+ * per-model daily quota from a bare 429 without re-parsing the message text.
+ */
+class GeminiError(val code: Int, override val message: String, internal val body: String = "") :
+    Exception("Gemini($code): $message")
 
 private fun summarizeError(body: String, fallback: String): String {
     // Look for a `"message":"..."` inside a nested `"error"` object.

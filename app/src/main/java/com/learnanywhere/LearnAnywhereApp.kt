@@ -37,6 +37,15 @@ class LearnAnywhereApp : Application() {
     lateinit var ui: com.learnanywhere.ui.UiController
         private set
 
+    /**
+     * Process-wide model-failover state (DESIGN.md §8): which Gemini models
+     * are currently overloaded or out of daily quota. Shared by every
+     * real-work call — asks, the tool loop, figure captions, the boilerplate
+     * classifier — so one model's outage is learned once. Settings "Test
+     * connection" deliberately does NOT use it: that must test the chip.
+     */
+    val failover = com.learnanywhere.agent.ModelFailover()
+
     private val scope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate
     )
@@ -67,7 +76,8 @@ class LearnAnywhereApp : Application() {
                 store = store,
                 tavilyKey = { prefs.getString(KEY_TAVILY_API_KEY, "").orEmpty() },
                 webEnabled = { prefs.getBoolean(KEY_WEB_SEARCH, true) }
-            )
+            ),
+            failover = failover
         )
         ui = com.learnanywhere.ui.UiController(this)
 
@@ -85,7 +95,8 @@ class LearnAnywhereApp : Application() {
             if (key.isBlank()) null
             else com.learnanywhere.agent.Gemini(
                 { key },
-                { prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL).orEmpty() }
+                { prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL).orEmpty() },
+                failover = failover
             ).generateText(
                 contents = listOf(com.learnanywhere.agent.Gemini.Message(
                     "user", listOf(com.learnanywhere.agent.Gemini.Part(text = prompt)))),

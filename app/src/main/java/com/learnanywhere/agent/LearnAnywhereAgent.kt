@@ -28,7 +28,13 @@ class LearnAnywhereAgent(
     private val docs: () -> List<Document>,
     private val appCtx: Context,
     private val webSearch: () -> Boolean = { true },
-    private val tools: AgentTools? = null
+    private val tools: AgentTools? = null,
+    /**
+     * Shared model-failover state (DESIGN.md §8). One instance covers every
+     * real-work call — asks, the tool loop, figure captions — so a model that
+     * 503s or runs out of daily quota on one path is skipped on the others.
+     */
+    private val failover: ModelFailover? = null
 ) {
     data class AgentReply(
         val text: String,
@@ -102,7 +108,7 @@ class LearnAnywhereAgent(
         onToolCall: ((String) -> Unit)? = null
     ): AgentReply =
         withContext(Dispatchers.IO) { askMutex.withLock {
-            val client = Gemini(api, model)
+            val client = Gemini(api, model, failover = failover)
             val docsHere = docs()
 
             suspend fun buildGrounding(inlineOnly: Boolean): Pair<List<Gemini.Message>, Boolean> {
@@ -311,7 +317,7 @@ class LearnAnywhereAgent(
     /** On-demand caption for a rendered PDF page. */
     suspend fun captionFigure(doc: Document, figure: com.learnanywhere.data.Figure): String =
         withContext(Dispatchers.IO) {
-            val client = Gemini(api, model)
+            val client = Gemini(api, model, failover = failover)
             val sys = com.learnanywhere.core.Figures.captionPrompt(doc.title, figure.title)
             val msg = Gemini.Message("user", listOf(
                 Gemini.Part(text = "Caption this figure:"),
