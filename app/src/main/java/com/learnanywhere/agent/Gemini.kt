@@ -190,9 +190,12 @@ class Gemini(
                 return r
             } catch (e: GeminiError) {
                 val kind = ModelFailover.classify(e.code, e.body)
-                if (kind == ModelFailover.Failure.NONE || i == plan.lastIndex || !mayFailOver())
-                    throw e
+                if (kind == ModelFailover.Failure.NONE) throw e
+                // Bench the model even when THIS turn can't use another one
+                // (last rung, or deltas already spoken) — the outage is real
+                // and the next turn's plan() should know about it.
                 fo.markUnavailable(route, kind)
+                if (i == plan.lastIndex || !mayFailOver()) throw e
                 TranscriptLog.log("failover",
                     "${route.model} $kind (HTTP ${e.code}) → ${plan[i + 1].model}")
             }
