@@ -1,6 +1,21 @@
 # LearnAnywhere — status
 
 ## Current: DESIGN §7 built and installed; live-verified except answer-depth eval (2026-09-22 morning)
+
+**Model failover chain (DESIGN §8, 2026-09-24) — built + tested, NOT yet
+live-verified on device.** Gemini calls now walk a chain (Settings chip →
+3.8-flash → 3.6-flash → flash-lite, deduped) instead of surfacing an error:
+a 503 after the in-model retries benches that model for 5 minutes, a
+daily-quota 429 benches it until the next midnight Pacific (RPD is
+per-model). Bare 429s, 4xx and transport failures behave exactly as before;
+Settings "Test connection" still tests the chip only; a stream that has
+already spoken never fails over. Pure policy in `agent/ModelFailover.kt`,
+chain loop in `Gemini.kt`, one shared instance on `LearnAnywhereApp`.
+Failovers show up in the debug transcript as `kind:"failover"` — that is what
+to look for live; the §7 leftovers (answer-depth eval, classifier under the
+new heuristics union) are the natural thing to retry now that a 503/quota
+storm no longer blocks a turn.
+
 Second UX round (answer quality / silent boilerplate skip / voice seek), per
 DESIGN.md §7, built by three delegated agents + fixes, all merged, 144 JVM
 tests green, installed on-device (verify APK freshness — see gotcha below):

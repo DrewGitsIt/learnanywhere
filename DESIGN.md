@@ -453,3 +453,67 @@ Drew's second UX round, with his calls recorded:
    returning each section's start offset in the source text (needed by both
    the skip-map and seek), so skip filtering and quote→section mapping
    share one geometry.
+
+## 8. Model failover chain (decided 2026-09-24)
+
+The free tier fails two ways that a *different Gemini model* can absorb, and
+§7's round was blocked live by both at once. Decision: **fail over, don't
+surface** — per-request retry/backoff stays exactly as it is and runs first;
+failover is what happens when it is spent.
+
+1. **The chain**: the user's Settings chip first, then the remaining ids in
+   capability order — `gemini-3.8-flash`, `gemini-3.6-flash`,
+   `gemini-flash-lite-latest` — deduped. The chip is read per request (the
+   user can switch mid-session) and failover never writes to prefs: the
+   preference is the user's, the outage is ours to route around.
+2. **Two triggers, two windows**:
+   - **503 "high demand"**, after the in-model retries are exhausted →
+     Google is shedding traffic from that model's capacity pool. The model is
+     benched for **five minutes**.
+   - **daily-quota 429** (`PerDay`) → RPD is **per-model** and resets at
+     midnight Pacific, so the model is benched **until the next 00:00
+     America/Los_Angeles** (computed with java.time, so DST is wall-clock
+     correct). Its siblings each still have their own budget.
+   A benched model is never dropped from the chain, only pushed to the back:
+   when everything is benched the request is still made and the server's own
+   error surfaces, rather than a local invention. When a window expires the
+   preferred model is probed again naturally, on the next turn.
+3. **Why bench at all** (instead of re-probing the chip every turn): Gemini's
+   implicit prompt cache is **per model**, and §5 spends real effort keeping
+   the prompt prefix byte-stable to hit it. Alternating models turn every
+   turn into a cache miss on both. Five minutes is the cheapest window that
+   stops the thrash without leaving recovered capacity unused for long.
+4. **Bare 429s are excluded.** A 429 with no RetryInfo and no `PerDay` is
+   permanent for the request *shape*, not for the model — free-tier search
+   grounding (quota limit 0, §3.7) is the live example, and it is already
+   handled by dropping the tool and retrying. Failing over would just burn
+   the same shape against the next model. 400/403/404, key errors and
+   non-HTTP transport failures are likewise nobody else's problem: current
+   behavior, unchanged.
+5. **Ping is exempt.** Settings "Test connection" must honestly test the chip
+   the user just tapped — a green tick served by a fallback would be a lie
+   about the very thing being tested. It builds its Gemini client without a
+   failover instance, which is also the no-op default everywhere else.
+6. **No mid-stream failover.** Streamed replies are spoken sentence by
+   sentence as deltas arrive. Once any delta has been emitted the turn
+   belongs to that model: a fallback would start its answer from the top and
+   the user would hear the opening twice. A failure after first audio
+   therefore surfaces exactly as it does today (and the existing
+   mid-stream-drop → non-streamed retry still applies). Failover applies only
+   while the request has produced no user-visible output.
+7. **Shape**: chain entries are `Route(backend, model)` with a single-valued
+   `enum Backend { GEMINI }`. The indirection is deliberate and paid for now
+   so the next round — an OpenAI-shaped backend as a further fallback — adds
+   an enum case and a client, not a reshaping of the policy. No OpenAI code
+   exists yet.
+8. **Placement**: the chain loop lives in `Gemini.kt` (`overChain`, wrapping
+   one-model `generateOnce` / `streamOnce` attempts), driven by an optional
+   `failover: ModelFailover?` constructor parameter — null means one model
+   per request, i.e. today's behavior. The policy itself (chain derivation,
+   classification, benching, Pacific midnight) is in the pure, clock-injected
+   `ModelFailover`, unit-tested without HTTP. One shared instance lives on
+   `LearnAnywhereApp` and covers every real-work call — asks, the tool loop,
+   figure captions, the boilerplate classifier — so an outage is learned
+   once. Failover events are written to the transcript log (`kind:
+   "failover"`), which is how a fallback-served turn is recognized later; no
+   new UI.
